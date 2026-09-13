@@ -350,3 +350,12 @@ exact previous static display. Unlimited sessions still omit the timer.
 Proof: deterministic `data-remaining="45678"` + `12:41:18` static agreement,
 single-script assertions, `node --check` over every inline script block,
 no-JS fallback equivalence; theme 61/61, entry 37/37, full regression green.
+
+## 19. Forward loading state (paint-first navigation)
+
+Complaint: a black gap between portal visit and login render. Cause: the
+instant-navigation script ran at head-parse, before first paint, leaving a
+blank (dark-mode black) gap during the ~2.6 s server render. Fix: the forward
+page now paints a loading state first (CREATING SESSION + CSS spinner + light
+`html` background + `color-scheme: light`), navigating on window `load`, with
+meta-refresh + manual button unchanged underneath. Nothing else touched.

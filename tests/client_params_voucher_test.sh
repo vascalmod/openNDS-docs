@@ -77,8 +77,12 @@ NOCUSTOM_OUT=$(run_status "$NOCUSTOM_JSON")
 BADCUSTOM_OUT=$(run_status "$BADCUSTOM_JSON")
 
 # --- 1. preauth -> auto-forward, zero clicks, no stock dump ---
-check "forward-meta-refresh" 'printf "%s" "$PREAUTH_OUT" | grep -q "refresh.*url=http://status.client/login"'
+# Painted loading state navigates on window load; meta + button survive.
+check "forward-meta-refresh" 'printf "%s" "$PREAUTH_OUT" | grep "refresh" | grep -q "url=http://status.client/login"'
 check "forward-fallback-form" 'printf "%s" "$PREAUTH_OUT" | grep -q "action=\"http://status.client/login\""'
+check "forward-loading-state" 'printf "%s" "$PREAUTH_OUT" | grep -q "CREATING SESSION" && printf "%s" "$PREAUTH_OUT" | grep -q "load-spinner"'
+check "forward-load-navigation" 'printf "%s" "$PREAUTH_OUT" | grep -q "addEventListener"'
+check "forward-light-bg" 'printf "%s" "$PREAUTH_OUT" | grep -q "color-scheme"'
 check "forward-brand" 'printf "%s" "$PREAUTH_OUT" | grep -q "WI-FI E-VOUCHER"'
 check "forward-no-session-status" '! printf "%s" "$PREAUTH_OUT" | grep -q "Session Status"'
 check "forward-no-account-dump" '! printf "%s" "$PREAUTH_OUT" | grep -q "MAC address"'
@@ -152,6 +156,8 @@ check "status-single-script" '[ "$(printf "%s" "$AUTHED_OUT" | grep -o "<script>
 check "status-inline-css" 'printf "%s" "$AUTHED_OUT" | grep -q "connection-status"'
 
 # --- 9. inline scripts are real syntax (node --check when available) ---
+# Forward page now legitimately carries one script (load-time navigation),
+# so the check counts scripts per page instead of assuming absence.
 if command -v node >/dev/null 2>&1; then
 	printf '%s' "$AUTHED_OUT $PREAUTH_OUT" | grep -o "<script>.*</script>" | sed "s|<script>||;s|</script>||" > /tmp/jsblocks.txt
 	JSN=0; JSFAIL=0

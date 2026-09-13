@@ -277,11 +277,15 @@ voucher_code() {
 }
 
 # voucher_forward_page: unauthenticated browsers go straight into the standard
-# login flow with zero clicks: instant client-side navigation with meta-refresh
-# + manual fallback (all three survive independently). The target is the stock
-# login endpoint, which mints a fresh FAS query for the ThemeSpec — no voucher
-# data is fabricated here. CPD clients ignore page bodies (protocol is MHD's
-# 511 + redirect), so this changes nothing for them.
+# login flow with zero clicks. Paint FIRST, navigate SECOND: the loading state
+# below renders immediately (spinner + text), and navigation fires on window
+# load — a head-parse script could navigate before first paint, leaving a
+# blank (black in dark mode) gap during the multi-second login render.
+# Meta-refresh + manual fallback survive underneath, so no-JS clients behave
+# exactly as before. The target is the stock login endpoint, which mints a
+# fresh FAS query for the ThemeSpec — no voucher data is fabricated here.
+# CPD clients ignore page bodies (protocol is MHD's 511 + redirect), so this
+# changes nothing for them.
 voucher_forward_page() {
 	echo "<!DOCTYPE html>
 		<html lang=\"en\">
@@ -292,8 +296,8 @@ voucher_forward_page() {
 		<meta charset=\"utf-8\">
 		<meta name=\"viewport\" content=\"width=device-width, initial-scale=1.0\">
 		<meta http-equiv=\"refresh\" content=\"0;url=$url/login\">
+		<meta name=\"color-scheme\" content=\"light\">
 		<title>WI-FI E-VOUCHER</title>
-		<script>window.location.replace(\"$url/login\");</script>
 		<style>
 		* { box-sizing: border-box; margin: 0; padding: 0; }
 		body { min-height: 100vh; font-family: Arial, Helvetica, sans-serif; background: #f4f6f8; color: #17202a; display: flex; align-items: center; justify-content: center; padding: 20px; }
@@ -304,6 +308,9 @@ voucher_forward_page() {
 		.brand p { margin-top: 7px; font-size: 12px; color: #7b8794; letter-spacing: 1px; }
 		.voucher-form button { width: 100%; height: 50px; margin-top: 14px; border: 0; border-radius: 10px; background: #1677ff; color: #ffffff; font-size: 14px; font-weight: bold; cursor: pointer; }
 		.note { margin-top: 16px; text-align: center; font-size: 11px; color: #7b8794; line-height: 1.5; }
+		html { background: #f4f6f8; }
+		.load-spinner { width: 34px; height: 34px; margin: 22px auto 6px; border: 3px solid #e5e9ed; border-top-color: #1677ff; border-radius: 50%; animation: vspin 0.8s linear infinite; }
+		@keyframes vspin { to { transform: rotate(360deg); } }
 		</style>
 		</head>
 		<body>
@@ -312,14 +319,16 @@ voucher_forward_page() {
 			<div class=\"brand\">
 				<div class=\"brand-icon\">WiFi</div>
 				<h1>WI-FI E-VOUCHER</h1>
-				<p>CONNECT TO INTERNET</p>
+				<p>CREATING SESSION</p>
 			</div>
-			<p class=\"note\">Opening the login page&hellip;</p>
+			<div class=\"load-spinner\"></div>
+			<p class=\"note\">Preparing your secure login&hellip;</p>
 			<form class=\"voucher-form\" action=\"$url/login\" method=\"get\">
 				<button type=\"submit\">Continue to login</button>
 			</form>
 		</section>
 		</main>
+		<script>window.addEventListener(\"load\",function(){window.location.replace(\"$url/login\");});</script>
 		</body>
 		</html>
 	"
