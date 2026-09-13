@@ -31,6 +31,17 @@
 #       the approved status.html mockup does (entity-encoded by core).
 # - userinfo intentionally does NOT contain the voucher value (marker only).
 #
+# Failure UX: denied claims render per-reason text from a fixed vocabulary
+# (expired / in-use / required / invalid / retry). Unknown, disabled and
+# malformed codes deliberately share ONE message (anti-enumeration); transport
+# failures share the retry message. Denied attempts write a masked server-side
+# log line (reason + client MAC only).
+#
+# Loading UX: submit buttons carry a CSS spinner + disabled state driven by a
+# tiny inline script (progressive enhancement ONLY — inert where JS is
+# blocked, e.g. strict CPD). Correctness never depends on it: the backend
+# claim is idempotent, so a duplicate submit cannot double-spend time.
+#
 # Constraints honoured:
 # - Does NOT modify libopennds.sh, binauth_log.sh, client_params.sh or config.
 # - No port 80 / LuCI / firewall / DHCP / statuspath changes.
@@ -134,6 +145,19 @@ header() {
 			font-size: 14px; font-weight: bold;
 			cursor: pointer;
 		}
+		.voucher-form button:disabled { opacity: 0.65; cursor: not-allowed; }
+		.btn-spinner {
+			display: none;
+			width: 14px; height: 14px;
+			margin-right: 8px;
+			border: 2px solid rgba(255, 255, 255, 0.45);
+			border-top-color: #ffffff;
+			border-radius: 50%;
+			vertical-align: -3px;
+			animation: vspin 0.8s linear infinite;
+		}
+		button.busy .btn-spinner { display: inline-block; }
+		@keyframes vspin { to { transform: rotate(360deg); } }
 		.plan {
 			display: grid;
 			grid-template-columns: repeat(3, 1fr);
@@ -207,9 +231,20 @@ footer() {
 	exit 0
 }
 
+# Submit helper (progressive enhancement ONLY): while the server validates
+# (multi-second backend round trip), show a spinner, relabel the button and
+# disable it against double taps. Where JS is blocked (strict CPD), the form
+# submits normally and correctness still holds: the backend claim is
+# idempotent (rerequest), so a duplicate submit cannot double-spend time.
+# ES5 syntax for old embedded webviews. Emitted once per page that has forms.
+voucher_submit_js() {
+	echo "<script>function voucherSubmit(f){var b=f.querySelector('button[type=submit]');if(!b||b.disabled){return false;}var t=b.querySelector('.btn-text');if(t){b.setAttribute('data-label',t.textContent);t.textContent='AUTHENTICATING…';}b.classList.add('busy');b.disabled=true;return true;}window.addEventListener('pageshow',function(){var bs=document.querySelectorAll('button.busy');for(var i=0;i<bs.length;i++){var b=bs[i];b.disabled=false;b.classList.remove('busy');var t=b.querySelector('.btn-text');if(t&&b.hasAttribute('data-label')){t.textContent=b.getAttribute('data-label');}}});</script>"
+}
+
 login_form() {
 	# $voucher here is entity-encoded by libopennds parse_variables; safe to
 	# reflect inside the quoted value attribute for re-serve preservation.
+	vjs=$(voucher_submit_js)
 	echo "
 		<section class=\"card\">
 			<div class=\"brand\">
@@ -217,7 +252,7 @@ login_form() {
 				<h1>WI-FI E-VOUCHER</h1>
 				<p>CONNECT TO INTERNET</p>
 			</div>
-			<form class=\"voucher-form\" action=\"/opennds_preauth/\" method=\"get\">
+			<form class=\"voucher-form\" action=\"/opennds_preauth/\" method=\"get\" onsubmit=\"return voucherSubmit(this)\">
 				<input type=\"hidden\" name=\"fas\" value=\"$fas\">
 				<label for=\"voucher\">Voucher Code</label>
 				<input
@@ -229,8 +264,9 @@ login_form() {
 					maxlength=\"20\"
 					value=\"$voucher\"
 				>
-				<button type=\"submit\">CONNECT</button>
+				<button type=\"submit\"><span class=\"btn-spinner\"></span><span class=\"btn-text\">CONNECT</span></button>
 			</form>
+			$vjs
 			<div class=\"plan\">
 				<div class=\"plan-item\"><strong>&#8369;5</strong><span>PRICE</span></div>
 				<div class=\"plan-item\"><strong>6 HOURS</strong><span>TIME</span></div>
@@ -255,6 +291,7 @@ thankyou_page() {
 	fi
 
 	# voucher/custom travel ONLY as hidden protocol fields (required by FAS).
+	vjs=$(voucher_submit_js)
 	echo "
 		<section class=\"card\">
 			<div class=\"brand\">
@@ -262,13 +299,14 @@ thankyou_page() {
 				<h1>WI-FI E-VOUCHER</h1>
 				<p>VOUCHER RECEIVED</p>
 			</div>
-			<form class=\"voucher-form\" action=\"/opennds_preauth/\" method=\"get\">
+			<form class=\"voucher-form\" action=\"/opennds_preauth/\" method=\"get\" onsubmit=\"return voucherSubmit(this)\">
 				<input type=\"hidden\" name=\"fas\" value=\"$fas\">
 				<input type=\"hidden\" name=\"voucher\" value=\"$voucher\">
 				$customhtml
 				<input type=\"hidden\" name=\"landing\" value=\"yes\">
-				<button type=\"submit\">Continue</button>
+				<button type=\"submit\"><span class=\"btn-spinner\"></span><span class=\"btn-text\">Continue</span></button>
 			</form>
+			$vjs
 			<p class=\"note\">If this page closes automatically, reopen your browser to continue.</p>
 		</section>
 	"
@@ -299,13 +337,23 @@ voucher_status_page() {
 		if [ "$ndsstatus" = "authenticated" ]; then
 			voucher_status_connected
 		else
+			voucher_deny_log
 			voucher_status_denied
 		fi
 	else
+		voucher_deny_log
 		voucher_status_denied
 	fi
 
 	footer
+}
+
+# Best-effort masked deny audit: failure class + client MAC only.
+# No voucher value, no PSK, no custom string, no backend detail.
+voucher_deny_log() {
+	if command -v logger >/dev/null 2>&1; then
+		logger -t opennds-voucher "theme deny why=${vdenywhy:-unknown} mac=$clientmac" 2>/dev/null
+	fi
 }
 
 # EAP-side voucher pre-validation for the ThemeSpec paths.
@@ -319,6 +367,10 @@ voucher_api_claim() {
 	vsession_min=0
 	vup=0
 	vdown=0
+	# Failure class for the denied page (never a raw backend string):
+	# badformat | noconfig | noreply | badreply | expired |
+	# invalid | unknown | disabled | paused. Empty means allowed or unset.
+	vdenywhy=""
 	vcode=$(printf '%s' "$voucher" | tr -d '\r\n' | sed 's/^ *//;s/ *$//')
 	vcode=$(printf '%s' "$vcode" | tr 'a-z' 'A-Z')
 	vok=1
@@ -335,6 +387,7 @@ voucher_api_claim() {
 	vlen=""
 	if [ "$vok" -ne 1 ]; then
 		vcode=""
+		vdenywhy="badformat"
 		return
 	fi
 	if [ -z "$VOUCHER_API_URL" ] && command -v uci >/dev/null 2>&1; then
@@ -345,12 +398,14 @@ voucher_api_claim() {
 	if [ -z "$VOUCHER_API_URL" ] || [ ! -f "$vpskfile" ]; then
 		vcode=""
 		vpskfile=""
+		vdenywhy="noconfig"
 		return
 	fi
 	vpsk=$(cat "$vpskfile" 2>/dev/null)
 	vpskfile=""
 	if [ -z "$vpsk" ]; then
 		vcode=""
+		vdenywhy="noconfig"
 		return
 	fi
 	vresp=""
@@ -362,6 +417,7 @@ voucher_api_claim() {
 	vpsk=""
 	if [ -z "$vresp" ]; then
 		vcode=""
+		vdenywhy="noreply"
 		return
 	fi
 	vline=$(printf '%s' "$vresp" | head -n 1)
@@ -369,6 +425,18 @@ voucher_api_claim() {
 	vnf=$(printf '%s' "$vline" | awk '{print NF}')
 	vline=""
 	if [ "$vdecision" != "ALLOW" ]; then
+		# Keep only the documented backend reason vocabulary; anything else
+		# (including empty/garbled replies) becomes a generic failure class.
+		vwhy=$(printf '%s' "$vresp" | awk 'NR==1{print $2}')
+		case "$vwhy" in
+			invalid|unknown|disabled|paused|expired)
+				vdenywhy="$vwhy"
+				;;
+			*)
+				vdenywhy="badreply"
+				;;
+		esac
+		vwhy=""
 		vresp=""
 		vdecision=""
 		vnf=""
@@ -383,6 +451,7 @@ voucher_api_claim() {
 			vdecision=""
 			vnf=""
 			vcode=""
+			vdenywhy="badreply"
 			return
 			;;
 	esac
@@ -400,6 +469,7 @@ voucher_api_claim() {
 		vup=0
 		vdown=0
 		vcode=""
+		vdenywhy="badreply"
 		return
 	fi
 	if [ "${#vrem}" -gt 7 ] || [ "${#vup}" -gt 7 ] || [ "${#vdown}" -gt 7 ]; then
@@ -407,6 +477,7 @@ voucher_api_claim() {
 		vup=0
 		vdown=0
 		vcode=""
+		vdenywhy="badreply"
 		return
 	fi
 	if [ "$vup" -gt 1000000 ] 2>/dev/null || [ "$vdown" -gt 1000000 ] 2>/dev/null; then
@@ -414,6 +485,7 @@ voucher_api_claim() {
 		vup=0
 		vdown=0
 		vcode=""
+		vdenywhy="badreply"
 		return
 	fi
 	if [ "$vrem" -le 0 ] 2>/dev/null; then
@@ -421,6 +493,7 @@ voucher_api_claim() {
 		vup=0
 		vdown=0
 		vcode=""
+		vdenywhy="expired"
 		return
 	fi
 	vsession_min=$(( (vrem + 59) / 60 ))
@@ -510,20 +583,55 @@ voucher_status_connected() {
 }
 
 voucher_status_denied() {
-	# Generic failure: no voucher/custom values, no backend detail, no oracle.
+	# User-facing failure text mapped from the claim failure class in
+	# $vdenywhy. Anti-enumeration rules (deliberate, do not "improve" without
+	# a security review):
+	# - unknown, disabled and malformed codes share ONE "not valid" message,
+	#   so responses never reveal whether a code exists or is admin-disabled;
+	# - transport/config failures share ONE retry message with no internals;
+	# - only expired (time genuinely exhausted) and paused (session held
+	#   elsewhere) get distinct text, since those describe the holder's own
+	#   voucher state rather than oracle answers.
+	case "$vdenywhy" in
+		expired)
+			vtitle="VOUCHER EXPIRED"
+			vmsg="This voucher has expired or its included time has been used up."
+			;;
+		paused)
+			vtitle="VOUCHER IN USE"
+			vmsg="This voucher is already active on another device."
+			;;
+		novoucher)
+			vtitle="VOUCHER REQUIRED"
+			vmsg="Please enter a voucher code to connect."
+			;;
+		noreply|noconfig|badreply|"")
+			vtitle="REQUEST FAILED"
+			vmsg="Something went wrong or the request timed out. Please try again."
+			;;
+		*)
+			vtitle="INVALID VOUCHER"
+			vmsg="This voucher code is not valid. Check the code and try again."
+			;;
+	esac
+	vjsd=$(voucher_submit_js)
 	echo "
 		<section class=\"card\">
 			<div class=\"brand\">
 				<div class=\"brand-icon\">WiFi</div>
 				<h1>WI-FI E-VOUCHER</h1>
-				<p>REQUEST FAILED</p>
+				<p>$vtitle</p>
 			</div>
-			<p class=\"note\">Something went wrong or the request timed out. Please try again.</p>
-			<form class=\"voucher-form\" action=\"http://$gatewayfqdn\" method=\"get\">
-				<button type=\"submit\">Try again</button>
+			<p class=\"note\">$vmsg</p>
+			<form class=\"voucher-form\" action=\"http://$gatewayfqdn\" method=\"get\" onsubmit=\"return voucherSubmit(this)\">
+				<button type=\"submit\"><span class=\"btn-spinner\"></span><span class=\"btn-text\">Try again</span></button>
 			</form>
+			$vjsd
 		</section>
 	"
+	vtitle=""
+	vmsg=""
+	vjsd=""
 }
 
 landing_page() {
@@ -539,6 +647,8 @@ landing_page() {
 	# voucher never reaches the auth call, and a denied/failed claim renders
 	# the generic fail page with no grant possible.
 	if [ -z "$voucher" ]; then
+		vdenywhy="novoucher"
+		voucher_deny_log
 		voucher_status_denied
 		footer
 	fi
@@ -546,6 +656,7 @@ landing_page() {
 	voucher_api_claim
 
 	if [ "$vallow" != "1" ]; then
+		voucher_deny_log
 		voucher_status_denied
 		footer
 	fi
@@ -559,6 +670,7 @@ landing_page() {
 
 	# No voucher / custom values rendered below (browser-privacy requirement).
 	# Verification happens server-side: binauthlog.log + ndsctl json (see test proc).
+	vjsl=$(voucher_submit_js)
 	auth_success="
 		<section class=\"card\">
 			<div class=\"brand\">
@@ -567,9 +679,10 @@ landing_page() {
 				<p>REQUEST SENT</p>
 			</div>
 			<p class=\"note\">Your request was processed. You can use your browser as normal if access was granted.</p>
-			<form class=\"voucher-form\" action=\"$gatewayurl\" method=\"get\">
-				<button type=\"submit\">Continue</button>
+			<form class=\"voucher-form\" action=\"$gatewayurl\" method=\"get\" onsubmit=\"return voucherSubmit(this)\">
+				<button type=\"submit\"><span class=\"btn-spinner\"></span><span class=\"btn-text\">Continue</span></button>
 			</form>
+			$vjsl
 		</section>
 	"
 	auth_fail="
@@ -580,11 +693,13 @@ landing_page() {
 				<p>REQUEST FAILED</p>
 			</div>
 			<p class=\"note\">Something went wrong or the request timed out. Please try again.</p>
-			<form class=\"voucher-form\" action=\"http://$gatewayfqdn\" method=\"get\">
-				<button type=\"submit\">Try again</button>
+			<form class=\"voucher-form\" action=\"http://$gatewayfqdn\" method=\"get\" onsubmit=\"return voucherSubmit(this)\">
+				<button type=\"submit\"><span class=\"btn-spinner\"></span><span class=\"btn-text\">Try again</span></button>
 			</form>
+			$vjsl
 		</section>
 	"
+	vjsl=""
 
 	if [ "$ndsstatus" = "authenticated" ]; then
 		echo "$auth_success"

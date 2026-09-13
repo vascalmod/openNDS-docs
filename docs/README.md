@@ -46,6 +46,18 @@
 
 ## Changelog
 
+* Unified entry: `client_params_voucher.sh` (status.client auto-forward/fallback
+  + custom status, err511 also forwards; HTTP 511 semantics untouched);
+  `tests/client_params_voucher_test.sh` 31/31; deploy = file content into
+  stock path + backup (UCI key unsupported); see `STAGE2C_BUILD.md` §12–14.
+  Deployed live + proven.
+* Error vocabulary + loading UX: reason-mapped denied pages (expired/in-use/
+  invalid/retry, anti-enumeration asserted), masked deny audit, CSS spinner +
+  disabled submit via progressive-only inline script; harness 52/52; undeployed.
+* Direct-to-status: `theme_voucher.sh` CONNECT now authenticates immediately and
+  renders custom status (CONNECTED + remaining + own voucher, no Continue tap);
+  legacy thankyou/landing kept as fallback; `tests/theme_voucher_test.sh` 25/25;
+  undeployed (see `STAGE2C_BUILD.md` §9).
 * Stage 2: `custombinauth.voucher.sh` + `backend/` + `tests/` added; `theme_voucher.sh`
   markers moved Stage 1-bypass → Stage 2-validation (flow identical);
   `docs/09` corrected per verdict (6 items); this index rewritten; `10` added.

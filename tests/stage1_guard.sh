@@ -21,7 +21,7 @@ echo "--- scope guards (must print nothing) ---"
 scope_fail=0
 # NOTE: test files are excluded by design — they must spell BinAuth method
 # names (e.g. timeout_deauth) to exercise them. Only shipped code is policed.
-for f in custombinauth.voucher.sh theme_voucher.sh backend/api.py; do
+for f in custombinauth.voucher.sh theme_voucher.sh client_params_voucher.sh backend/api.py; do
 	# NOTE: only grant-capable verbs are forbidden. Read-only `ndsctl json` /
 	# `ndsctl status` queries are allowed: the theme status timer reads
 	# session_end exactly like stock client_params.sh does.

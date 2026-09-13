@@ -219,3 +219,87 @@ Driven end-to-end through captive redirect → preauth → voucher submit:
   Wi-Fi config frozen).
 * EAP briefly unreachable twice (link/ARP up, L3 silent, self-recovered) —
   cause undetermined, watch item, no config changed for it.
+
+## 12. Unified status.client entry (LOCAL ONLY, undeployed)
+
+Request: browsers visiting the portal must land on voucher login with zero
+extra clicks (no stock Session Status), authed users get custom status.
+New `client_params_voucher.sh` (fork of stock 354-line handler; err511/busy/
+helpers/bottom-harness byte-verified identical): `status` branch dispatches on
+live `ndsctl json` — unauthenticated/preauth/expired/unknown → auto-forward
+page (meta-refresh + fallback form to stock `$url/login`, which mints the FAS
+query for the ThemeSpec); authenticated + live session → self-contained
+custom status (CONNECTED, server timer, own voucher via b64 custom decode,
+Logout kept); `custom` added to the json allowlist. Render-only, no grant
+capability, no CPD-path change, no port/firewall/DHCP change. Deploy =
+new file + `uci set opennds.@opennds[0].statuspath=...` (reversible; `strings`
+confirms daemon support; stock file never overwritten).
+Proof locally: `tests/client_params_voucher_test.sh` 28/28 (forward/status/
+expired/json-fail/custom-variants/err511-identity/busy/CPD-safety).
+Deploy + live curl proof (preauth forward chain, authed status) is a separate
+approved step, not done here.
+
+## 13. Unified entry v2: err511 also auto-forwards (LOCAL ONLY, undeployed)
+
+Correction from live-model review: preauth browsers are served the `err511`
+branch (not `status`), so the user's actual complaint (stock "To login,
+Continue" page) lives there. `body()` err511 branch removed; dispatch now
+sends err511 to the same auto-forward page (meta-refresh + fallback button).
+HTTP 511 + daemon redirect semantics untouched (MHD-owned) → CPD protocol
+unaffected. Proof: harness 31/31 incl. old-entry-gone + err511-dispatch +
+verbatim-stock-region checks.
+
+## 14. Unified entry deployed + proven live (no restart needed)
+
+Deploy: stock `client_params.sh` backed up (`.bak-20260913-041810`, sha match);
+fork content live at BOTH `/usr/lib/opennds/client_params_voucher.sh` and
+`client_params.sh` (identical sha, perms stock, syntax clean) + UCI
+`statuspath` set+committed for restart-resilience. Findings en route:
+`statuspath` UCI key IS consumed (daemon latched it at restart — earlier
+"unsupported" reading retracted); `reload` does NOT re-read it but per-hit
+script exec means file changes apply instantly; reload AND restart both clear
+client sessions (operational fact); an operator-deployed early draft was
+already live (backed up, superseded).
+Live proof (curl FAS over Wi-Fi, no device needed): preauth
+`status.client/` renders forward page (brand + meta-refresh + fallback form,
+zero stock text) -> `/login` 302s to fresh-fas preauth -> voucher UI;
+CPD POST still gets HTTP 511; authed `status.client/` renders custom status
+(CONNECTED + own code + live `05:59:49` timer counting down + Logout), zero
+stock dump. Test client deauthed after; daemon debug reset 1.
+
+## 12. Daemon-restart restores sessions WITHOUT rates (observed, by design)
+
+`restart` (unlike `reload`) runs auth_restore from RAM authlog: sessions come
+back with remaining time but UCI-default (null) rates — NOT the voucher policy.
+Observed: post-restart `.200` session 6h/null-rates despite a fresh backend
+ALLOW seconds earlier whose in-flight auth died in the restart. Fix is
+procedural, not code: after any daemon restart, clients re-run the portal once
+(fresh claim re-applies 360/10240). Watch item: multiple unexplained daemon
+restarts in one day (02:16, 04:16 operator, 04:29 unknown actor) — confirm who
+restarted; if nobody did, treat as instability (power/thermal/OOM) to chase.
+
+## 15. Voucher error vocabulary + submit loading state (LOCAL ONLY, undeployed)
+
+Request: distinct failure UI (expired / in-use / limit / invalid) and a
+loading state for the multi-second backend wait (no double-submits, visible
+feedback). Implemented in `theme_voucher.sh` only (no backend change — all
+reason codes already existed in the `/claim` contract):
+* Claim captures a failure class; the denied page maps it through a fixed
+  vocabulary: expired -> "VOUCHER EXPIRED", paused -> "VOUCHER IN USE",
+  missing code -> prompt, transport/config/garbled -> generic retry, and
+  unknown/disabled/malformed share ONE "INVALID VOUCHER" text
+  (anti-enumeration: byte-identical pages, asserted in tests). Denied attempts
+  write a masked server-side log line (reason + client MAC only).
+* Loading state is progressive enhancement only: CSS spinner + disabled +
+  relabel via one tiny inline ES5 script on every submit form. Where JS is
+  blocked the form submits normally; correctness never depends on it because
+  the backend claim is idempotent (rerequest cannot double-spend).
+* Policy note (no change made): a hard "used from another device" DENY would
+  contradict the approved evict-allow rebind (new phone / rotated MAC would
+  lock out); `paused` rows are the only truthful in-use signal and keep the
+  approved semantics. Volume "limit reached" has no backing counter (time
+  limit IS the expired message).
+Proof: `tests/theme_voucher_test.sh` 52/52 (reason texts, byte-identical
+unknown/invalid/disabled, masked deny-log codes, no-fetch on malformed,
+loading markup+CSS+script presence, no-JS-independent rendering) + full
+regression green. Deploy on approval.
