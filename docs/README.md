@@ -1,28 +1,63 @@
-# OpenNDS voucher portal — static inspection report (index)
+# openNDS voucher portal — repo reading guide (START HERE)
 
-Source of truth: local copies under `~/portal_eap/opennds/` taken from EAP225-Outdoor V3.
-Do NOT assume upstream parity.
+> If you are an AI reviewer (ChatGPT): read this file first, then follow the
+> order below. Source of truth for device behavior is `../opennds/` (copies
+> from the EAP225-Outdoor V3, openNDS 10.3.1-r3 — do NOT assume upstream parity).
+> Target: OpenWrt 25.12.x, 128 MB RAM / 16 MB flash, gateway `10.0.0.1`,
+> `gatewayfqdn=status.client`, MHD `:2050`, LuCI `:80`.
 
-Target: OpenWrt 25.12.x, openNDS 10.3.1-r3, 128 MB RAM / 16 MB flash,
-gateway `10.0.0.1`, `gatewayfqdn=status.client`, MHD `:2050`, LuCI `:80`.
+## Where things stand
 
-UI mockups (design source only, not served raw):
+* **Stage 1 DONE** — CPD-safe voucher login ThemeSpec, proven on Android CPD + Chrome.
+* **Stage 2 DONE (local, NOT deployed to EAP)** — real voucher validation +
+  initial session authorization (backend + EAP claimant + tests).
+* **Stage 3 DESIGN ONLY** — unified `status.client` entry + custom status +
+  pause/resume. Approved as a target, NOT approved for implementation.
 
-* `index.html:22-39` — `<form class="voucher-form">` has no `action`, no `method`, no `fas` hidden field, input `name="voucher"`.
-* `index.html:7`, `status.html:7` — external `<link rel="stylesheet" href="index.css">`.
-* `index.css:1` — literal ```` ```css ```` fence. Invalid CSS if served raw.
-* `status.html:30-32,40,55` — hardcoded `05:42:17`, `ABCD-1234`, `<button type="button">PAUSE</button>` with no form/action.
+## Read order for reviewers
 
-These must be adapted into ThemeSpec-generated HTML (see `01-execution-flow.md`, `05-entrypoint-cpd-filemap.md`).
+1. `10-stage2-validation.md` — current implementation: scope, files, decisions,
+   EAP↔backend contract, test results, what is still manual.
+2. `09-stage2-unified-entrypoint.md` — Stage 3 design record WITH the 6 approved
+   corrections (internal-PreAuth, paused re-identification, dual-state CONNECTED,
+   routing trace, one-backend CPD+Chrome, port-80 lock).
+3. `08-stage1-checks.md` — Stage 1 test evidence.
+4. `01-…-07-….md` — ORIGINAL static-analysis snapshot (Q1–Q19 + A–E). Historical;
+   where it conflicts with 08/09/10 or the root `STAGE*_BUILD.md` files, the
+   newer documents win. In particular: `PORTAL-TEST` is RETIRED (absent from the
+   backend ⇒ deny), and `custombinauth` is no longer a stub in Stage 2
+   (`../custombinauth.voucher.sh` replaces it at deploy; `../opennds/` keeps the
+   pristine stub copy).
+5. Root `../STAGE2_BUILD.md` — full Stage 2 build record + manual deploy/rollback
+   (not run). Root `../STAGE1_BUILD.md` / `../STAGE1_PLAN_README.md` — Stage 1 history.
 
-## File map
+## Code map (repo root `../`)
 
-* `01-execution-flow.md` — Q1 exact HTTP → ThemeSpec → auth → BinAuth flow.
-* `02-variables-binauth-voucher.md` — Q2 variables to ThemeSpec, Q3 BinAuth args, Q4 voucher passing via `encode_custom()`.
-* `03-status-pause-resume.md` — Q5 status generation, Q6 `ndsctl auth/deauth/json` for PAUSE/RESUME.
-* `04-persistence-identity-accounting.md` — Q7 survives reconnect, Q8 voucher-without-permanent-MAC, Q9 randomized MAC, Q10 6-hour usage accounting, Q11 status access while paused.
-* `05-entrypoint-cpd-filemap.md` — Q12 single entry `10.0.0.1`, Q13 CSS/JS in CPD, Q14 which file to extend, Q15 minimum new files, Q16 final layout.
-* `06-security-constraints-bugs.md` — Q17 injection risks, Q18 flash/RAM, Q19 bugs/assumptions.
-* `07-plan-tests.md` — A-E: known, unknown, architecture, files, EAP tests.
+* `theme_voucher.sh` — Stage 1/2 login ThemeSpec (inline CSS, no JS, no ToS).
+* `custombinauth.voucher.sh` — Stage 2 EAP claimant, deploys as
+  `/usr/lib/opennds/custombinauth.sh`. `auth_client`-only, fail-closed.
+* `backend/` — `api.py` (one validation function; `POST /claim` line protocol +
+  `GET /session` JSON + `/healthz`), `schema.sql` (PostgreSQL),
+  `seed.sql` (LOCAL TEST rows only, no secrets), `test_api.py` (9 unittests).
+* `tests/custombinauth_test.sh` — 11-case shell harness, all PASS locally.
+* `opennds/` — pristine device copies. Never edited; reference only.
+* `index.html` / `index.css` / `status.html` — approved UI mockups (design source,
+  not served raw; `index.css:1` fence is invalid if served raw).
 
-No implementation code. No file modifications. No config changes yet.
+## Changelog
+
+* Stage 2: `custombinauth.voucher.sh` + `backend/` + `tests/` added; `theme_voucher.sh`
+  markers moved Stage 1-bypass → Stage 2-validation (flow identical);
+  `docs/09` corrected per verdict (6 items); this index rewritten; `10` added.
+* Stage 1: `theme_voucher.sh` + `docs/08` + root `STAGE1_*`.
+* Base: `opennds/` copies + `docs/01-07` analysis + UI mockups.
+
+## Constraints every reviewer must respect
+
+* One backend, one validation function, one voucher table for CPD AND Chrome.
+* Entry/status layer is render-only; sole grant path is
+  ThemeSpec → `auth_log()` → `ndsctl auth` → `binauth_log.sh` → `custombinauth` → backend.
+* MAC/IP/token/URL-params are never identity; backend authoritative; generic fail
+  pages (no invalid-vs-expired oracle); no voucher/custom in visible text.
+* Port 80 / LuCI / firewall / DHCP untouched. No EAP deploy without approval.
+  No secrets in this repo (PSK is env/file-only, 0600, never committed).
