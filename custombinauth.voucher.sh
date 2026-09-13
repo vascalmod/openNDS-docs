@@ -9,18 +9,24 @@
 #   Parent echoes them and exits with $exitlevel (300-309).
 #
 # SCOPE (Stage 2): initial authorization only.
-#   - Act ONLY on action=auth_client. All deauth/accounting callbacks fall
-#     through untouched (time accrual is Stage 3; schema already carries the
-#     columns so history exists).
-#   - Fail CLOSED: any validation/backend/parse failure => exitlevel=1 (deny).
+#   - Method gate: BinAuth outputs are authoritative for auth_client; every
+#     OTHER grant-capable method (the ndsctl_auth family seen as action=auth,
+#     client_auth, or anything unknown-but-not-deauth) is validated too WHENEVER
+#     it carries a voucher= claim. With no voucher claim present we ABSTAIN
+#     with parent defaults untouched, so preemptive/admin/informational flows
+#     keep byte-identical behavior. Deauth/accounting callbacks (*deauth) can
+#     never grant: passthrough untouched (time accrual is Stage 3).
+#   - Fail CLOSED: any attempted-but-failed voucher validation => exitlevel=1.
 #     The stock REQUEST FAILED page is generic (no invalid-vs-expired oracle).
 #   - Single DB + single validation function live in the backend (Ubuntu +
 #     PostgreSQL). This script is a thin EAP-side claimant: it NEVER validates
 #     locally, NEVER branches per browser (CPD vs Chrome identical).
 #   - MAC/IP/token are transient metadata for the claim, NEVER identity.
-#     Re-entry with a new (randomized) MAC rebinds by voucher code; backend
-#     may name an EVICT mac which we deauth best-effort via the documented
-#     libopennds daemon_deauth hook (meant to be called from binauth scripts).
+#     Re-entry with a new (randomized) MAC rebinds by voucher code ONLY on the
+#     primary auth_client path; secondary methods never move a binding that
+#     belongs to someone else (abstain instead). Backend may name an EVICT mac
+#     which we deauth best-effort via the documented
+#     libopennds daemon hook (meant to be called from binauth scripts).
 #
 # PRIVACY: voucher/custom never echoed to pages (ThemeSpec rule). Here the
 #   value only travels EAP->backend in the claim POST body. Local syslog (if
@@ -56,6 +62,205 @@ if [ ! -f "$VOUCHER_PSK_FILE" ] && command -v uci >/dev/null 2>&1; then
 	fi
 	_uci_pskfile=""
 fi
+
+# --- shared backend claim (used by every validated path below) ---
+# Requires prepared globals: vnorm, vmac, vip, vtoken, vneutral (0|1), vmethod.
+# Sets the parent contract vars (session_length, rates, quotas, exitlevel).
+# Secondary methods (vneutral=1) confirm-or-deny only: when the backend names
+# an EVICT mac owned by someone else, we ABSTAIN with parent defaults instead
+# of disturbing the authoritative binding (only auth_client may rebind).
+# Never exits; caller falls through to binauth_log.sh tail.
+vbackend_claim() {
+	# NOTE: caller pre-sets vdeny for gate failures (e.g. bad charset/meta);
+	# the guarded stages below skip, and the apply stage enforces the deny.
+	# Fresh vdeny state is the caller's responsibility (both callers init it).
+
+	# --- config present? (fail-closed forces operator configuration) ---
+	vpsk=""
+	if [ -z "$vdeny" ]; then
+		if [ -z "$VOUCHER_API_URL" ]; then
+			vdeny="no_api_url"
+		elif [ ! -f "$VOUCHER_PSK_FILE" ]; then
+			vdeny="no_psk_file"
+		else
+			vpsk=$(cat "$VOUCHER_PSK_FILE" 2>/dev/null)
+			if [ -z "$vpsk" ]; then
+				vdeny="no_psk"
+			fi
+		fi
+	fi
+
+	# --- claim against backend (router egress; browser never calls it) ---
+	# Every body value passed the gates above (allowlisted voucher; strict or
+	# empty MAC; strict IPv4 or neutral-empty; token-safe charset or
+	# neutral-empty; operator PSK), so no value can alter the form structure
+	# (&, =, %, CR, LF cannot occur).
+	vresp=""
+	if [ -z "$vdeny" ]; then
+		vpost="voucher=$vnorm&mac=$vmac&ip=$vip&token=$vtoken&psk=$vpsk"
+		vpsk=""
+		if command -v uclient-fetch >/dev/null 2>&1; then
+			vresp=$(uclient-fetch -q -T "$VOUCHER_TIMEOUT" -O - --post-data="$vpost" "$VOUCHER_API_URL" 2>/dev/null)
+		elif command -v wget >/dev/null 2>&1; then
+			vresp=$(wget -q -T "$VOUCHER_TIMEOUT" -O - --post-data="$vpost" "$VOUCHER_API_URL" 2>/dev/null)
+		else
+			vdeny="no_http_client"
+		fi
+		vpost=""
+	fi
+
+	# --- parse line response (strict shape, validated numerics) ---
+	# Accept ONLY:
+	#   ALLOW <remaining_seconds> <up_kbps> <down_kbps>
+	#   ALLOW <remaining_seconds> <up_kbps> <down_kbps> EVICT <oldmac>
+	# Anything else (bare ALLOW, non-numeric/negative/oversized values,
+	# wrong field count, bad EVICT) => DENY. First line only.
+	vremaining=""
+	vup=""
+	vdown=""
+	vevict=""
+	if [ -z "$vdeny" ]; then
+		vline=$(printf '%s' "$vresp" | head -n 1)
+		vdecision=$(printf '%s' "$vline" | awk '{print $1}')
+		vnf=$(printf '%s' "$vline" | awk '{print NF}')
+		vline=""
+		if [ "$vdecision" = "ALLOW" ]; then
+			case "$vnf" in
+				4|6)
+					;;
+				*)
+					vdeny="bad_reply"
+					;;
+			esac
+			if [ -z "$vdeny" ]; then
+				vremaining=$(printf '%s' "$vresp" | awk 'NR==1{print $2}')
+				vup=$(printf '%s' "$vresp" | awk 'NR==1{print $3}')
+				vdown=$(printf '%s' "$vresp" | awk 'NR==1{print $4}')
+				case "$vremaining" in ""|*[!0-9]*) vdeny="bad_reply";; esac
+				case "$vup" in ""|*[!0-9]*) vdeny="bad_reply";; esac
+				case "$vdown" in ""|*[!0-9]*) vdeny="bad_reply";; esac
+				# Bounds: remaining <= 9999999 (~115 days, far above any plan);
+				# rates <= 1000000 kb/s. openNDS session cap applied below.
+				if [ -z "$vdeny" ]; then
+					if [ "${#vremaining}" -gt 7 ] || [ "${#vup}" -gt 7 ] || [ "${#vdown}" -gt 7 ]; then
+						vdeny="bad_reply"
+					elif [ "$vup" -gt 1000000 ] 2>/dev/null || [ "$vdown" -gt 1000000 ] 2>/dev/null; then
+						vdeny="bad_reply"
+					fi
+				fi
+				if [ -z "$vdeny" ] && [ "$vremaining" -le 0 ] 2>/dev/null; then
+					vdeny="no_remaining"
+				fi
+			fi
+			if [ -z "$vdeny" ] && [ "$vnf" -eq 6 ]; then
+				vfifth=$(printf '%s' "$vresp" | awk 'NR==1{print $5}')
+				vsixth=$(printf '%s' "$vresp" | awk 'NR==1{print $6}')
+				if [ "$vfifth" != "EVICT" ]; then
+					vdeny="bad_reply"
+				else
+					case "$vsixth" in
+						??:??:??:??:??:??)
+							case "$vsixth" in
+								*[!0-9a-fA-F:]*)
+									vdeny="bad_reply"
+									;;
+								*)
+									vevict="$vsixth"
+									;;
+							esac
+							;;
+						*)
+							vdeny="bad_reply"
+							;;
+					esac
+				fi
+				vfifth=""
+				vsixth=""
+			fi
+		elif [ "$vdecision" = "DENY" ]; then
+			vdeny="backend_deny"
+		else
+			vdeny="bad_reply"
+		fi
+		vdecision=""
+		vnf=""
+	fi
+	vresp=""
+
+	# Secondary methods confirm-or-deny only: a stranger's binding restores
+	# parent defaults (abstain) instead of moving it.
+	if [ -z "$vdeny" ] && [ "$vneutral" = "1" ] && [ -n "$vevict" ]; then
+		session_length=0
+		upload_rate=0
+		download_rate=0
+		upload_quota=0
+		download_quota=0
+		exitlevel=0
+		if command -v logger >/dev/null 2>&1; then
+			logger -t opennds-voucher "decision=abstain reason=bound-elsewhere mac=$vmac method=$vmethod" 2>/dev/null
+		fi
+		vnorm=""
+		vremaining=""
+		vup=""
+		vdown=""
+		vevict=""
+		vdeny=""
+		return
+	fi
+
+	# --- apply decision to parent contract (fail-closed) ---
+	if [ -n "$vdeny" ]; then
+		exitlevel=1
+		session_length=0
+		upload_rate=0
+		download_rate=0
+		upload_quota=0
+		download_quota=0
+	else
+		# ceil(remaining_secs/60): openNDS session granularity is minutes.
+		session_length=$(( (vremaining + 59) / 60 ))
+		if [ "$session_length" -gt 1440 ]; then
+			session_length=1440
+		fi
+		upload_rate="$vup"
+		download_rate="$vdown"
+		upload_quota=0
+		download_quota=0
+		exitlevel=0
+
+		# Best-effort single-session eviction of the superseded device.
+		# Async daemon hook (documented for binauth callers); never fatal:
+		# a failed evict leaves the old record to expire naturally.
+		if [ -n "$vevict" ] && [ "$vevict" != "$vmac" ]; then
+			if [ -x "$VOUCHER_LIBOPENDS" ]; then
+				("$VOUCHER_LIBOPENDS" daemon_deauth "$vevict" >/dev/null 2>&1 &)
+			fi
+		fi
+	fi
+
+	# --- masked syslog (no voucher value, no PSK, no custom) ---
+	if command -v logger >/dev/null 2>&1; then
+		if [ -n "$vdeny" ]; then
+			logger -t opennds-voucher "decision=deny reason=$vdeny mac=$vmac method=$vmethod" 2>/dev/null
+		else
+			# POSIX-only suffix (no `rev`: absent on busybox/OpenWrt).
+			vpre=$(printf '%s' "$vnorm" | cut -c1-2)
+			vlen2=${#vnorm}
+			vpost_mask=$(printf '%s' "$vnorm" | cut -c"$((vlen2 - 1))"-)
+			logger -t opennds-voucher "decision=allow voucher=${vpre}***${vpost_mask} mac=$vmac sess_min=$session_length method=$vmethod" 2>/dev/null
+			vpre=""
+			vpost_mask=""
+			vlen2=""
+		fi
+	fi
+
+	vnorm=""
+	vremaining=""
+	vup=""
+	vdown=""
+	vevict=""
+	vdeny=""
+}
 
 if [ "$action" = "auth_client" ]; then
 	vdeny=""
@@ -193,175 +398,104 @@ if [ "$action" = "auth_client" ]; then
 		vtoklen=""
 	fi
 
-	# --- 5. config present? (fail-closed forces operator configuration) ---
-	vpsk=""
-	if [ -z "$vdeny" ]; then
-		if [ -z "$VOUCHER_API_URL" ]; then
-			vdeny="no_api_url"
-		elif [ ! -f "$VOUCHER_PSK_FILE" ]; then
-			vdeny="no_psk_file"
-		else
-			vpsk=$(cat "$VOUCHER_PSK_FILE" 2>/dev/null)
-			if [ -z "$vpsk" ]; then
-				vdeny="no_psk"
-			fi
-		fi
-	fi
+	# --- backend claim (shared): validates via backend, applies contract. ---
+	# Unconditional: vbackend_claim honors a pre-set vdeny (gate failures
+	# above) by skipping fetch/parse and enforcing the deny in apply.
+	vneutral=0
+	vmethod="$action"
+	vbackend_claim
 
-	# --- 6. claim against backend (router egress; browser never calls it) ---
-	# Every body value passed the gates above (allowlisted voucher; strict or
-	# empty MAC; strict IPv4; token-safe charset; operator PSK), so no value
-	# can alter the form structure (&, =, %, CR, LF cannot occur).
-	vresp=""
-	if [ -z "$vdeny" ]; then
-		vpost="voucher=$vnorm&mac=$vmac&ip=$vip&token=$vtoken&psk=$vpsk"
-		vpsk=""
-		if command -v uclient-fetch >/dev/null 2>&1; then
-			vresp=$(uclient-fetch -q -T "$VOUCHER_TIMEOUT" -O - --post-data="$vpost" "$VOUCHER_API_URL" 2>/dev/null)
-		elif command -v wget >/dev/null 2>&1; then
-			vresp=$(wget -q -T "$VOUCHER_TIMEOUT" -O - --post-data="$vpost" "$VOUCHER_API_URL" 2>/dev/null)
-		else
-			vdeny="no_http_client"
-		fi
-		vpost=""
-	fi
-
-	# --- 7. parse line response (strict shape, validated numerics) ---
-	# Accept ONLY:
-	#   ALLOW <remaining_seconds> <up_kbps> <down_kbps>
-	#   ALLOW <remaining_seconds> <up_kbps> <down_kbps> EVICT <oldmac>
-	# Anything else (bare ALLOW, non-numeric/negative/oversized values,
-	# wrong field count, bad EVICT) => DENY. First line only.
-	vremaining=""
-	vup=""
-	vdown=""
-	vevict=""
-	if [ -z "$vdeny" ]; then
-		vline=$(printf '%s' "$vresp" | head -n 1)
-		vdecision=$(printf '%s' "$vline" | awk '{print $1}')
-		vnf=$(printf '%s' "$vline" | awk '{print NF}')
-		vline=""
-		if [ "$vdecision" = "ALLOW" ]; then
-			case "$vnf" in
-				4|6)
-					;;
-				*)
-					vdeny="bad_reply"
-					;;
-			esac
-			if [ -z "$vdeny" ]; then
-				vremaining=$(printf '%s' "$vresp" | awk 'NR==1{print $2}')
-				vup=$(printf '%s' "$vresp" | awk 'NR==1{print $3}')
-				vdown=$(printf '%s' "$vresp" | awk 'NR==1{print $4}')
-				case "$vremaining" in ""|*[!0-9]*) vdeny="bad_reply";; esac
-				case "$vup" in ""|*[!0-9]*) vdeny="bad_reply";; esac
-				case "$vdown" in ""|*[!0-9]*) vdeny="bad_reply";; esac
-				# Bounds: remaining <= 9999999 (~115 days, far above any plan);
-				# rates <= 1000000 kb/s. openNDS session cap applied below.
-				if [ -z "$vdeny" ]; then
-					if [ "${#vremaining}" -gt 7 ] || [ "${#vup}" -gt 7 ] || [ "${#vdown}" -gt 7 ]; then
-						vdeny="bad_reply"
-					elif [ "$vup" -gt 1000000 ] 2>/dev/null || [ "$vdown" -gt 1000000 ] 2>/dev/null; then
-						vdeny="bad_reply"
-					fi
-				fi
-				if [ -z "$vdeny" ] && [ "$vremaining" -le 0 ] 2>/dev/null; then
-					vdeny="no_remaining"
-				fi
-			fi
-			if [ -z "$vdeny" ] && [ "$vnf" -eq 6 ]; then
-				vfifth=$(printf '%s' "$vresp" | awk 'NR==1{print $5}')
-				vsixth=$(printf '%s' "$vresp" | awk 'NR==1{print $6}')
-				if [ "$vfifth" != "EVICT" ]; then
-					vdeny="bad_reply"
-				else
-					case "$vsixth" in
-						??:??:??:??:??:??)
-							case "$vsixth" in
-								*[!0-9a-fA-F:]*)
-									vdeny="bad_reply"
-									;;
-								*)
-									vevict="$vsixth"
-									;;
-							esac
-							;;
-						*)
-							vdeny="bad_reply"
-							;;
-					esac
-				fi
-				vfifth=""
-				vsixth=""
-			fi
-		elif [ "$vdecision" = "DENY" ]; then
-			vdeny="backend_deny"
-		else
-			vdeny="bad_reply"
-		fi
-		vdecision=""
-		vnf=""
-	fi
-	vresp=""
-
-	# --- 8. apply decision to parent contract (fail-closed) ---
-	if [ -n "$vdeny" ]; then
-		exitlevel=1
-		session_length=0
-		upload_rate=0
-		download_rate=0
-		upload_quota=0
-		download_quota=0
-	else
-		# ceil(remaining_secs/60): openNDS session granularity is minutes.
-		session_length=$(( (vremaining + 59) / 60 ))
-		if [ "$session_length" -gt 1440 ]; then
-			session_length=1440
-		fi
-		upload_rate="$vup"
-		download_rate="$vdown"
-		upload_quota=0
-		download_quota=0
-		exitlevel=0
-
-		# Best-effort single-session eviction of the superseded device.
-		# Async daemon hook (documented for binauth callers); never fatal:
-		# a failed evict leaves the old record to expire naturally.
-		if [ -n "$vevict" ] && [ "$vevict" != "$vmac" ]; then
-			if [ -x "$VOUCHER_LIBOPENDS" ]; then
-				("$VOUCHER_LIBOPENDS" daemon_deauth "$vevict" >/dev/null 2>&1 &)
-			fi
-		fi
-	fi
-
-	# --- 9. masked syslog (no voucher value, no PSK, no custom) ---
-	if command -v logger >/dev/null 2>&1; then
-		if [ -n "$vdeny" ]; then
-			logger -t opennds-voucher "decision=deny reason=$vdeny mac=$vmac" 2>/dev/null
-		else
-			vpre=$(printf '%s' "$vnorm" | cut -c1-2)
-			vpost_mask=$(printf '%s' "$vnorm" | rev | cut -c1-2 | rev)
-			logger -t opennds-voucher "decision=allow voucher=${vpre}***${vpost_mask} mac=$vmac sess_min=$session_length" 2>/dev/null
-			vpre=""
-			vpost_mask=""
-		fi
-	fi
-
-	vnorm=""
+	# Branch-local extraction vars (backend vars were cleaned by the call).
 	vraw=""
 	vdecoded=""
-	vmac=""
-	vip=""
-	vtoken=""
-	vremaining=""
-	vup=""
-	vdown=""
-	vevict=""
-	vdeny=""
+	vlen=""
+
+	# (backend stages removed here: the shared vbackend_claim call above
+	# performs config/fetch/parse/apply/log identically.)
 else
-	# Non-auth_client (deauth/accounting callbacks): leave parent defaults.
-	# Time accrual is Stage 3; nothing to enforce here.
-	:
+	case "$action" in
+		*deauth)
+			# Deauth/accounting callbacks can never grant: passthrough with
+			# parent defaults untouched. Time accrual is Stage 3.
+			:
+			;;
+		*)
+			# Secondary grant-capable path (the ndsctl_auth family and any
+			# unknown non-deauth method): validate ONLY when a voucher=
+			# claim is present; otherwise abstain with defaults untouched.
+			# Positional slots are unreliable here ($5/$6 are NOT ip/token),
+			# so metadata stays neutral (strict-or-empty MAC, empty ip/token):
+			# empty values cannot inject, and the voucher alone decides.
+			vdeny=""
+			vdecoded=""
+			vdecoded=$(ndsctl b64decode "$custom" 2>/dev/null)
+			vraw=""
+			vnorm=""
+			if [ -n "$vdecoded" ]; then
+				vraw=$(printf '%s' "$vdecoded" | tr ',' '\n' | grep '^voucher=' | head -n 1)
+				vraw=${vraw#voucher=}
+				vraw=$(printf '%s' "$vraw" | tr -d '\r\n' | sed 's/^ *//;s/ *$//')
+				if [ -n "$vraw" ]; then
+					vnorm=$(printf '%s' "$vraw" | tr 'a-z' 'A-Z')
+					vlen=${#vnorm}
+					if [ "$vlen" -lt 4 ] || [ "$vlen" -gt 20 ]; then
+						vdeny="bad_length"
+					else
+						case "$vnorm" in
+							*[!A-Z0-9-]*)
+								vdeny="bad_charset"
+								;;
+						esac
+					fi
+					vlen=""
+				fi
+			fi
+			if [ -z "$vnorm" ] && [ -z "$vdeny" ]; then
+				# No voucher claim carried: abstain, parent defaults intact.
+				vdecoded=""
+				vraw=""
+			elif [ -n "$vdeny" ]; then
+				# Malformed voucher= carried: fail closed (generic page).
+				exitlevel=1
+				session_length=0
+				upload_rate=0
+				download_rate=0
+				upload_quota=0
+				download_quota=0
+				if command -v logger >/dev/null 2>&1; then
+					logger -t opennds-voucher "decision=deny reason=$vdeny mac=$2 method=$action" 2>/dev/null
+				fi
+				vdecoded=""
+				vraw=""
+				vnorm=""
+				vdeny=""
+			else
+				vmac="$2"
+				case "$vmac" in
+					??:??:??:??:??:??)
+						case "$vmac" in
+							*[!0-9a-fA-F:]*)
+								vmac=""
+								;;
+						esac
+						;;
+					*)
+						vmac=""
+						;;
+				esac
+				vip=""
+				vtoken=""
+				vneutral=1
+				vmethod="$action"
+				vbackend_claim
+				vmac=""
+				vip=""
+				vtoken=""
+				vdecoded=""
+				vraw=""
+			fi
+			;;
+	esac
 fi
 
 # Fall off the end WITHOUT exit/return so binauth_log.sh continues to

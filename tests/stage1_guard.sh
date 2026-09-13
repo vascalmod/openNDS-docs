@@ -19,8 +19,13 @@ echo "--- scope guards (must print nothing) ---"
 # (PAUSED-state *deny handling* is required Stage 2 behavior and is
 # intentionally NOT matched; only accrual hooks are.)
 scope_fail=0
-for f in custombinauth.voucher.sh theme_voucher.sh backend/api.py backend/test_api.py backend/test_pg.py backend/test_server.py tests/custombinauth_test.sh; do
-	if sed 's/^[[:space:]]*#.*$//' "$f" | grep -n -E "uci set|statuspath|gatewayport|gatewayinterface|iptables|nft (add|delete|insert|replace|flush)|ndsctl (auth|deauth|json|status)|idle_deauth|timeout_deauth|while true"; then
+# NOTE: test files are excluded by design — they must spell BinAuth method
+# names (e.g. timeout_deauth) to exercise them. Only shipped code is policed.
+for f in custombinauth.voucher.sh theme_voucher.sh backend/api.py; do
+	# NOTE: only grant-capable verbs are forbidden. Read-only `ndsctl json` /
+	# `ndsctl status` queries are allowed: the theme status timer reads
+	# session_end exactly like stock client_params.sh does.
+	if sed 's/^[[:space:]]*#.*$//' "$f" | grep -n -E "uci set|statuspath|gatewayport|gatewayinterface|iptables|nft (add|delete|insert|replace|flush)|ndsctl (auth|deauth)|idle_deauth|timeout_deauth|while true"; then
 		echo "guard: FORBIDDEN STRING PRESENT in $f"
 		scope_fail=1
 	fi
@@ -43,7 +48,7 @@ fi
 echo "--- forbidden-string allowlist check ---"
 # daemon_deauth (async hook) is the only sanctioned openNDS call besides b64*;
 # confirm no bare 'ndsctl auth|deauth' hides behind it.
-if grep -rn "ndsctl" custombinauth.voucher.sh | grep -v "b64\|daemon hook\|documented\|ndsctl verb"; then
+if grep -rn "ndsctl" custombinauth.voucher.sh | grep -v "b64\|daemon hook\|documented\|ndsctl verb\|ndsctl_auth\|ndsctl-driven"; then
 	echo "guard: unexpected ndsctl usage"
 	FAIL=1
 else

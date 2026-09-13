@@ -1,0 +1,198 @@
+#!/bin/sh
+# tests/theme_voucher_test.sh — mock-render + gating tests for theme_voucher.sh
+# Stubs library/transport/daemon calls; no network, no EAP.
+# Run: sh tests/theme_voucher_test.sh
+cd "$(dirname "$0")/.." || exit 1
+
+PASS=0
+FAIL=0
+
+# Fixed clock: now=9912300000, stub session_end=9912345678 -> timer 12:41:18.
+THEME="$PWD/theme_voucher.sh"
+mkdir -p /tmp/ndscids
+: > /tmp/ndscids/ndsinfo
+PSKFILE=$(mktemp)
+printf 'dummy-test-psk' > "$PSKFILE"
+export VOUCHER_API_URL="http://test.invalid/claim"
+export VOUCHER_PSK_FILE="$PSKFILE"
+
+# Source the real ThemeSpec (top level only assigns vars; libopennds does the
+# same via `. $themespecpath`). Stubs below stand in for library/daemon calls.
+load_theme() { . "$THEME"; }
+
+# uclient-fetch cannot be a shell function (hyphen illegal in dash), so stub
+# it as an executable on PATH printing $FETCH_RESP (mirrors EAP behavior).
+STUBBIN=$(mktemp -d)
+printf '#!/bin/sh\nprintf "%%s" "$FETCH_RESP"\n' > "$STUBBIN/uclient-fetch"
+chmod +x "$STUBBIN/uclient-fetch"
+PATH="$STUBBIN:$PATH"
+export PATH
+
+setup_stubs() {
+	encode_custom() { custom="Q1VTVE9N"; }
+	auth_log() {
+		printf '%s|%s|%s' "$session_length" "$upload_rate" "$download_rate" > "$CALLREC"
+		ndsstatus="$AUTH_RESULT"
+	}
+	configure_log_location() { mountpoint="/tmp"; }
+	date() {
+		case "$1" in
+			+%s) printf '9912300000' ;;
+			+*) printf '2026' ;;
+			*) command date "$@" ;;
+		esac
+	}
+	ndsctl() {
+		case "$1" in
+			json) printf '{"session_end": "9912345678"}' ;;
+			b64decode) printf '%s' "$2" ;;
+		esac
+	}
+}
+
+# render_login renders the empty-voucher view (never authenticates).
+render_login() {
+	(
+		load_theme
+		setup_stubs
+		fas="TESTFAS" voucher="" gatewayfqdn="status.client"
+		gatewayname="TestGW" clientip="10.0.0.200" clientmac="AA:BB:CC:DD:EE:01"
+		header
+		voucher_login
+	) 2>/dev/null
+}
+
+# render_flow <fetch-resp> <auth-result> [voucher]
+# Caller owns $CALLREC (mktemp -u path, exported): the auth_log stub records
+# quotas there, proving whether the auth call happened and with what policy.
+render_flow() {
+	(
+		load_theme
+		setup_stubs
+		FETCH_RESP="$1"
+		AUTH_RESULT="$2"
+		export FETCH_RESP AUTH_RESULT
+		fas="TESTFAS" voucher="${3:-TEST-6H}" gatewayfqdn="status.client"
+		gatewayname="TestGW" clientip="10.0.0.200" clientmac="AA:BB:CC:DD:EE:01"
+		header
+		voucher_login
+	) 2>/dev/null
+}
+
+check() {
+	desc="$1"; cond="$2"
+	if eval "$cond"; then
+		PASS=$((PASS + 1)); echo "PASS: $desc"
+	else
+		FAIL=$((FAIL + 1)); echo "FAIL: $desc"
+	fi
+}
+
+LOGIN_OUT=$(render_login)
+STATUS_OUT=$(render_flow "ALLOW 21600 10240 10240" "authenticated")
+DENIED_OUT=$(render_flow "DENY unknown" "authenticated")
+
+# --- 1. login view unchanged ---
+check "login-has-voucher-input" 'printf "%s" "$LOGIN_OUT" | grep -q "name=\"voucher\""'
+check "login-has-connect" 'printf "%s" "$LOGIN_OUT" | grep -q "CONNECT"'
+check "login-has-plan" 'printf "%s" "$LOGIN_OUT" | grep -q "6 HOURS"'
+check "login-has-fas" 'printf "%s" "$LOGIN_OUT" | grep -q "name=\"fas\""'
+check "login-no-thankyou" '! printf "%s" "$LOGIN_OUT" | grep -q "VOUCHER RECEIVED"'
+check "login-no-status" '! printf "%s" "$LOGIN_OUT" | grep -q "CONNECTED"'
+
+# --- 2. CONNECT goes straight to custom status (no Continue tap) ---
+check "status-connected" 'printf "%s" "$STATUS_OUT" | grep -q "CONNECTED"'
+check "status-timer-12-41-18" 'printf "%s" "$STATUS_OUT" | grep -q "12:41:18"'
+check "status-shows-own-voucher-once" '[ "$(printf "%s" "$STATUS_OUT" | grep -o "TEST-6H" | wc -l)" -eq 1 ]'
+check "status-speed" 'printf "%s" "$STATUS_OUT" | grep -q "10 Mbps"'
+check "status-active" 'printf "%s" "$STATUS_OUT" | grep -q "Active"'
+check "status-no-thankyou" '! printf "%s" "$STATUS_OUT" | grep -q "VOUCHER RECEIVED"'
+check "status-no-landing-field" '! printf "%s" "$STATUS_OUT" | grep -q "landing"'
+check "status-no-continue-to-landing" '! printf "%s" "$STATUS_OUT" | grep -q "value=\"Continue\""'
+
+# --- 3. gating: auth call happens ONLY on backend ALLOW, with policy quotas ---
+# (CALLREC owned outside each render: footer exits inside the subshell.)
+ALLOW_CALLREC=$(mktemp)
+ALLOW_CALL_OUT=$(export CALLREC="$ALLOW_CALLREC"; render_flow "ALLOW 21600 10240 10240" "authenticated" 2>/dev/null; printf 'CALL=%s' "$(cat "$ALLOW_CALLREC")"; rm -f "$ALLOW_CALLREC")
+DENY_CALLREC=$(mktemp)
+DENY_CALL_OUT=$(export CALLREC="$DENY_CALLREC"; render_flow "DENY unknown" "authenticated" 2>/dev/null; printf 'CALL=%s' "$(cat "$DENY_CALLREC")"; rm -f "$DENY_CALLREC")
+FAILCALLREC=$(mktemp)
+FAILCALL_OUT=$(export CALLREC="$FAILCALLREC"; render_flow "" "authenticated" 2>/dev/null; printf 'CALL=%s' "$(cat "$FAILCALLREC")"; rm -f "$FAILCALLREC")
+check "allow-calls-auth-with-policy" 'printf "%s" "$ALLOW_CALL_OUT" | grep -q "CALL=360|10240|10240"'
+check "deny-skips-auth-call" 'printf "%s" "$DENY_CALL_OUT" | grep -q "CALL=$"'
+check "fetch-fail-skips-auth-call" 'printf "%s" "$FAILCALL_OUT" | grep -q "CALL=$"'
+check "denied-fail-page" 'printf "%s" "$DENIED_OUT" | grep -q "REQUEST FAILED"'
+check "denied-no-voucher-text" '! printf "%s" "$DENIED_OUT" | grep -q "TEST-6H"'
+check "denied-no-timer" '! printf "%s" "$DENIED_OUT" | grep -q "REMAINING"'
+
+# --- 4. json outage degrades (CONNECTED, no fabricated timer) ---
+NOJSON_OUT=$( (
+	load_theme
+	setup_stubs
+	ndsctl() { printf ''; }
+	FETCH_RESP="ALLOW 21600 10240 10240" AUTH_RESULT="authenticated"
+	export FETCH_RESP AUTH_RESULT
+	CALLREC=$(mktemp); export CALLREC
+	fas="TESTFAS" voucher="TEST-6H" gatewayfqdn="status.client"
+	gatewayname="TestGW" clientip="10.0.0.200" clientmac="AA:BB:CC:DD:EE:01"
+	header
+	voucher_login
+) 2>/dev/null )
+check "nojson-still-connected" 'printf "%s" "$NOJSON_OUT" | grep -q "CONNECTED"'
+check "nojson-no-timer" '! printf "%s" "$NOJSON_OUT" | grep -q "REMAINING"'
+
+# --- 5. CPD safety: inline CSS present, no JS/href leftovers ---
+check "css-status-classes" 'printf "%s" "$STATUS_OUT" | grep -q "connection-status" && printf "%s" "$STATUS_OUT" | grep -q "timer-section" && printf "%s" "$STATUS_OUT" | grep -q "info-row"'
+check "no-script" '! printf "%s" "$STATUS_OUT" | grep -qi "<script"'
+check "no-href" '! printf "%s" "$STATUS_OUT" | grep -qi "href"'
+check "no-onclick" '! printf "%s" "$STATUS_OUT" | grep -qi "onclick"'
+
+# --- 6. legacy paths hardened: landing requires voucher + ALLOW ---
+# (CALLREC owned outside: landing_page ends in footer->exit, so the record is
+# read after the subshell completes.)
+LEGACY_OK_CALLREC=$(mktemp)
+LEGACY_OK=$( (
+	load_theme
+	setup_stubs
+	FETCH_RESP="ALLOW 21600 10240 10240" AUTH_RESULT="authenticated"
+	export FETCH_RESP AUTH_RESULT
+	CALLREC="$LEGACY_OK_CALLREC"; export CALLREC
+	fas="TESTFAS" voucher="TEST-6H" landing="yes" gatewayfqdn="status.client"
+	gatewayname="TestGW" clientip="10.0.0.200" clientmac="AA:BB:CC:DD:EE:01"
+	landing_page
+) 2>/dev/null )
+LEGACY_OK="$LEGACY_OK CALL=$(cat "$LEGACY_OK_CALLREC")"; rm -f "$LEGACY_OK_CALLREC"
+LEGACY_NOVOUCHER_CALLREC=$(mktemp)
+LEGACY_NOVOUCHER=$( (
+	load_theme
+	setup_stubs
+	FETCH_RESP="ALLOW 21600 10240 10240" AUTH_RESULT="authenticated"
+	export FETCH_RESP AUTH_RESULT
+	CALLREC="$LEGACY_NOVOUCHER_CALLREC"; export CALLREC
+	fas="TESTFAS" voucher="" landing="yes" gatewayfqdn="status.client"
+	gatewayname="TestGW" clientip="10.0.0.200" clientmac="AA:BB:CC:DD:EE:01"
+	landing_page
+) 2>/dev/null )
+LEGACY_NOVOUCHER="$LEGACY_NOVOUCHER CALL=$(cat "$LEGACY_NOVOUCHER_CALLREC")"; rm -f "$LEGACY_NOVOUCHER_CALLREC"
+LEGACY_DENY_CALLREC=$(mktemp)
+LEGACY_DENY=$( (
+	load_theme
+	setup_stubs
+	FETCH_RESP="DENY unknown" AUTH_RESULT="authenticated"
+	export FETCH_RESP AUTH_RESULT
+	CALLREC="$LEGACY_DENY_CALLREC"; export CALLREC
+	fas="TESTFAS" voucher="TEST-6H" landing="yes" gatewayfqdn="status.client"
+	gatewayname="TestGW" clientip="10.0.0.200" clientmac="AA:BB:CC:DD:EE:01"
+	landing_page
+) 2>/dev/null )
+LEGACY_DENY="$LEGACY_DENY CALL=$(cat "$LEGACY_DENY_CALLREC")"; rm -f "$LEGACY_DENY_CALLREC"
+check "legacy-allow-calls-auth" 'printf "%s" "$LEGACY_OK" | grep -q "CALL=360|10240|10240"'
+check "legacy-allow-renders" 'printf "%s" "$LEGACY_OK" | grep -q "REQUEST SENT"'
+check "legacy-no-voucher-skips-auth" 'printf "%s" "$LEGACY_NOVOUCHER" | grep -q "CALL=$"'
+check "legacy-no-voucher-fails" 'printf "%s" "$LEGACY_NOVOUCHER" | grep -q "REQUEST FAILED"'
+check "legacy-deny-skips-auth" 'printf "%s" "$LEGACY_DENY" | grep -q "CALL=$"'
+
+rm -f /tmp/ndscids/ndsinfo "$PSKFILE"
+rm -rf "$STUBBIN"
+echo "---- theme_voucher: PASS=$PASS FAIL=$FAIL ----"
+[ "$FAIL" -eq 0 ]

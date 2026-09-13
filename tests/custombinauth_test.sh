@@ -32,6 +32,13 @@ chmod +x "$HOOK"
 
 b64() { printf '%s' "$1" | base64 2>/dev/null | tr -d '\n'; }
 
+# Static portability gate: the EAP runs busybox ash WITHOUT rev/tac/column.
+# Any use below fails the suite before behavioral cases run.
+if grep -n -E "(^|[^a-zA-Z_-])(rev|tac|column)( |$)" "$PWD/custombinauth.voucher.sh"; then
+	echo "FAIL: non-busybox tool referenced"
+	exit 1
+fi
+
 PSKFILE=$(mktemp)
 printf 'dummy-psk' > "$PSKFILE"
 export VOUCHER_API_URL="http://test.invalid/claim"
@@ -116,6 +123,25 @@ run_case "reply-wrong-fifth" auth_client AA:BB:CC:DD:EE:01 10.0.0.200 tok1 \
 run_case "reply-five-fields" auth_client AA:BB:CC:DD:EE:01 10.0.0.200 tok1 \
 	"voucher=TEST-6H" "ALLOW 21600 10240 10240 extra" 1 0 1
 
+# --- secondary-method gate (action values as rewritten by binauth_log.sh:
+# ndsctl_auth arrives as "auth"; deauth variants arrive ending in "deauth").
+# Positional slots beyond $2/$custom are unreliable here; the script must use
+# neutral metadata (strict-or-empty MAC, empty ip/token).
+run_case "auth-valid" auth AA:BB:CC:DD:EE:01 1789264044 1789350444 \
+	"voucher=TEST-6H" "ALLOW 21600 10240 10240" 0 360 1
+run_case "auth-unknown" auth AA:BB:CC:DD:EE:01 1789264044 1789350444 \
+	"voucher=NOPE-1234" "DENY unknown" 1 0 1
+run_case "auth-no-custom" auth AA:BB:CC:DD:EE:01 1789264044 1789350444 \
+	"" "" 0 0 0
+run_case "auth-malformed-voucher" auth AA:BB:CC:DD:EE:01 1789264044 1789350444 \
+	"voucher=A;B" "" 1 0 0
+run_case "client_auth-valid" client_auth AA:BB:CC:DD:EE:01 x y \
+	"voucher=TEST-6H" "ALLOW 21600 10240 10240" 0 360 1
+run_case "timeout_deauth-passthrough" timeout_deauth AA:BB:CC:DD:EE:01 x y \
+	"voucher=TEST-6H" "" 0 0 0
+run_case "shutdown_deauth-passthrough" shutdown_deauth AA:BB:CC:DD:EE:01 x y \
+	"voucher=TEST-6H" "" 0 0 0
+
 # --- strict ip/token vectors (pre-network rejects: calls must stay 0) ---
 run_case "bad-ip-octet" auth_client AA:BB:CC:DD:EE:01 10.0.0.999 tok1 \
 	"voucher=TEST-6H" "ALLOW 21600 10240 10240" 1 0 0
@@ -159,6 +185,26 @@ if grep -q "daemon_deauth AA:BB:CC:DD:EE:09" "$EVICT_FILE" 2>/dev/null \
 	PASS=$((PASS + 1)); echo "PASS: evict-hook (deauth old MAC, sess=300)"
 else
 	FAIL=$((FAIL + 1)); echo "FAIL: evict-hook out=[$(cat /tmp/cb_out.txt)] evict=[$(cat "$EVICT_FILE" 2>/dev/null)]"
+fi
+
+# neutral path with a stranger-owned binding must ABSTAIN (defaults kept,
+# no evict hook), never move it: only auth_client may rebind.
+: > "$EVICT_FILE"
+printf '%s' "ALLOW 18000 10240 10240 EVICT AA:BB:CC:DD:EE:09" > "$RESPFILE"
+(
+	action="auth"
+	custom=$(b64 "voucher=TEST-6H")
+	session_length=0; upload_rate=0; download_rate=0
+	upload_quota=0; download_quota=0; exitlevel=0
+	set -- auth AA:BB:CC:DD:EE:02 redir ua 10.0.0.201 tok2 "$custom"
+	. "$PWD/custombinauth.voucher.sh"
+	echo "$exitlevel|$session_length"
+) > /tmp/cb_out.txt
+sleep 1
+if [ "$(cat /tmp/cb_out.txt)" = "0|0" ] && [ ! -s "$EVICT_FILE" ]; then
+	PASS=$((PASS + 1)); echo "PASS: neutral-evict-abstain (defaults kept, hook silent)"
+else
+	FAIL=$((FAIL + 1)); echo "FAIL: neutral-evict-abstain out=[$(cat /tmp/cb_out.txt)] evict=[$(cat "$EVICT_FILE" 2>/dev/null)]"
 fi
 
 # unconfigured API URL must fail closed

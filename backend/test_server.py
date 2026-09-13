@@ -134,6 +134,54 @@ class ServerTests(unittest.TestCase):
             self.assertEqual(exc.code, 403)
 
 
+    def test_chunked_body_like_uclient_fetch(self):
+        # Regression: EAP uclient-fetch POSTs chunked with NO Content-Length.
+        import socket as _socket
+        body = urllib.parse.urlencode(
+            {"voucher": "SRV-6H", "mac": "AA:BB:CC:DD:EE:0A",
+             "ip": "10.0.0.210", "token": "chunk-01", "psk": PSK}).encode()
+        chunks = "POST /claim HTTP/1.1\r\nHost: x\r\nTransfer-Encoding: chunked" \
+            "\r\nContent-Type: application/x-www-form-urlencoded\r\n\r\n"
+        chunks += "%X\r\n" % len(body) + body.decode() + "\r\n0\r\n\r\n"
+        s = _socket.create_connection(("127.0.0.1", self.port), timeout=10)
+        s.sendall(chunks.encode())
+        resp = b""
+        while True:
+            part = s.recv(4096)
+            if not part:
+                break
+            resp += part
+        s.close()
+        text = resp.decode("utf-8", "replace")
+        self.assertIn("200", text.splitlines()[0])
+        self.assertIn("ALLOW", text)
+
+    def test_malformed_chunking_denied_safely(self):
+        import socket as _socket
+        for payload in ("POST /claim HTTP/1.1\r\nHost: x\r\nTransfer-Encoding: chunked\r\n\r\nZZZ\r\n",
+                        "POST /claim HTTP/1.1\r\nHost: x\r\nTransfer-Encoding: chunked\r\n\r\n"):
+            s = _socket.create_connection(("127.0.0.1", self.port), timeout=10)
+            s.sendall(payload.encode())
+            try:
+                s.shutdown(_socket.SHUT_WR)
+            except OSError:
+                pass
+            resp = b""
+            try:
+                while True:
+                    part = s.recv(4096)
+                    if not part:
+                        break
+                    resp += part
+            except (socket.timeout, ConnectionResetError):
+                pass
+            s.close()
+            text = resp.decode("utf-8", "replace")
+            self.assertTrue("DENY" in text or text == "", text)
+            for word in ("Traceback", ".py", "/tmp/"):
+                self.assertNotIn(word, text)
+
+
 if __name__ == "__main__":
     print("LAN IP under test:", lan_ip())
     unittest.main(verbosity=2)

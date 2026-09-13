@@ -365,17 +365,61 @@ class Handler(BaseHTTPRequestHandler):
             log.error("GET failed:\n%s", traceback.format_exc())
             return self._send(500, "text/plain", b"error\n")
 
+    def _read_body(self, max_bytes=65536):
+        """Read a POST body with either Content-Length or chunked framing.
+
+        The EAP's uclient-fetch sends --post-data chunked with NO
+        Content-Length; without this helper its body reads as empty and every
+        claim fails closed with DENY auth. Malformed framing returns b"" and
+        the caller fails closed through the normal path. Bounded reads only.
+        """
+        try:
+            length = int(self.headers.get("Content-Length", 0) or 0)
+        except ValueError:
+            return None
+        if length:
+            if length > max_bytes:
+                return None
+            return self.rfile.read(length)
+        if "chunked" not in (self.headers.get("Transfer-Encoding", "") or "").lower():
+            return b""
+        chunks = []
+        total = 0
+        rfile = self.rfile
+        while True:
+            line = rfile.readline(128).decode("ascii", "replace").strip()
+            if not line:
+                return None
+            try:
+                size = int(line.split(";", 1)[0].strip(), 16)
+            except ValueError:
+                return None
+            if size == 0:
+                rfile.readline(16)
+                break
+            if size < 0 or total + size > max_bytes:
+                return None
+            buf = b""
+            while len(buf) < size:
+                part = rfile.read(size - len(buf))
+                if not part:
+                    return None
+                buf += part
+            chunks.append(buf)
+            total += size
+            rfile.readline(16)
+        return b"".join(chunks)
+
     def do_POST(self):
         try:
             parsed = urllib.parse.urlparse(self.path)
             if parsed.path != "/claim":
                 return self._send(404, "text/plain", b"DENY unknown\n")
-            try:
-                length = int(self.headers.get("Content-Length", 0) or 0)
-            except ValueError:
+            raw = self._read_body()
+            if raw is None:
                 return self._send(400, "text/plain", b"DENY malformed\n")
             fields = urllib.parse.parse_qs(
-                self.rfile.read(length).decode("utf-8", "replace"))
+                raw.decode("utf-8", "replace"))
             if not self._psk_ok((fields.get("psk") or [""])[0]):
                 return self._send(403, "text/plain", b"DENY auth\n")
             code, body = self._claim_body(fields)

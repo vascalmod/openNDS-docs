@@ -2,3 +2,8 @@ __pycache__/
 *.pyc
 *.db
 *.log
+
+# secret-bearing local files (never track)
+.env*
+*-psk
+*psk*.txt

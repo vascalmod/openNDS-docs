@@ -128,7 +128,25 @@ ChatGPT-mandated hardening, implemented locally, EAP untouched:
   8 ip/token vectors in the shell harness with fetch-call assertions.
 
 Results: `test_api` 11/11 · `test_pg` 6/6 (postgres:16-alpine disposable,
-`psycopg` 3.3.5) · `test_server` 3/3 (LAN 10.0.0.107) · shell 33/33 ·
+`psycopg` 3.3.5) · `test_server` 5/5 (LAN-bind, chunked-body regression,
+malformed-framing deny) · shell 33/33 + theme render 31/31 ·
 guard PASS. No-fallback proven (pg-configured + unreachable ⇒ BackendError,
 no sqlite file). Injection vectors denied pre-network (0 fetch calls).
-Stage 1 manifest: all 4 files unchanged.
+Stage 1 manifest: core files unchanged (theme hash refreshed for approved
+UI/flow changes, recorded in `tests/stage1_manifest.sha256`).
+
+## 10. Enforcement inversion + direct-to-status (production findings)
+
+Live EAP forensics proved this daemon honors the quotas carried IN the
+`ndsctl auth` request and may skip BinAuth on the FAS path (24 h ghost
+grants, zero backend contact). Enforcement therefore moved to where it
+cannot be skipped: `theme_voucher.sh` pre-validates via `voucher_api_claim()`
+and calls the auth entry ONLY on ALLOW with explicit policy quotas
+(deny/failure/empty ⇒ no call ⇒ no grant possible). Legacy landing hardened
+identically (presence gate + re-encoded custom). BinAuth claimant kept as
+audit/defense layer. Direct-to-status UI (CONNECTED + server timer, no
+Continue tap) rides the same gate; legacy two-step kept as fallback.
+Full story + live portal proof (`TEST-PORTAL` ALLOW/rebind,
+`NOPE-PORTAL` DENY + preauth hold, 6h00m + `10240/10240` daemon record):
+`STAGE2C_BUILD.md` §7–§11. EAP deploy of the theme change is a separate
+approved step; backend/API unchanged by it.
