@@ -79,7 +79,7 @@ BADCUSTOM_OUT=$(run_status "$BADCUSTOM_JSON")
 # --- 1. preauth -> auto-forward, zero clicks, no stock dump ---
 # Painted loading state navigates on window load; meta + button survive.
 check "forward-meta-refresh" 'printf "%s" "$PREAUTH_OUT" | grep "refresh" | grep -q "url=http://status.client/login"'
-check "forward-fallback-form" 'printf "%s" "$PREAUTH_OUT" | grep -q "action=\"http://status.client/login\""'
+check "forward-no-button" '! printf "%s" "$PREAUTH_OUT" | grep -q "<button"'
 check "forward-loading-state" 'printf "%s" "$PREAUTH_OUT" | grep -q "CREATING SESSION" && printf "%s" "$PREAUTH_OUT" | grep -q "load-spinner"'
 check "forward-load-navigation" 'printf "%s" "$PREAUTH_OUT" | grep -q "addEventListener"'
 check "forward-light-bg" 'printf "%s" "$PREAUTH_OUT" | grep -q "color-scheme"'

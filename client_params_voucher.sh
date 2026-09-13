@@ -281,8 +281,8 @@ voucher_code() {
 # below renders immediately (spinner + text), and navigation fires on window
 # load — a head-parse script could navigate before first paint, leaving a
 # blank (black in dark mode) gap during the multi-second login render.
-# Meta-refresh + manual fallback survive underneath, so no-JS clients behave
-# exactly as before. The target is the stock login endpoint, which mints a
+# Meta-refresh survives underneath for no-JS clients; no manual button by
+# owner decision (CPD ignores page bodies entirely). The target is the stock
 # fresh FAS query for the ThemeSpec — no voucher data is fabricated here.
 # CPD clients ignore page bodies (protocol is MHD's 511 + redirect), so this
 # changes nothing for them.
@@ -306,7 +306,6 @@ voucher_forward_page() {
 		.brand-icon { width: 58px; height: 58px; margin: 0 auto 16px; border-radius: 16px; background: #1677ff; color: #ffffff; display: flex; align-items: center; justify-content: center; font-size: 13px; font-weight: bold; }
 		.brand h1 { font-size: 21px; letter-spacing: 0.5px; }
 		.brand p { margin-top: 7px; font-size: 12px; color: #7b8794; letter-spacing: 1px; }
-		.voucher-form button { width: 100%; height: 50px; margin-top: 14px; border: 0; border-radius: 10px; background: #1677ff; color: #ffffff; font-size: 14px; font-weight: bold; cursor: pointer; }
 		.note { margin-top: 16px; text-align: center; font-size: 11px; color: #7b8794; line-height: 1.5; }
 		html { background: #f4f6f8; }
 		.load-spinner { width: 34px; height: 34px; margin: 22px auto 6px; border: 3px solid #e5e9ed; border-top-color: #1677ff; border-radius: 50%; animation: vspin 0.8s linear infinite; }
@@ -323,9 +322,6 @@ voucher_forward_page() {
 			</div>
 			<div class=\"load-spinner\"></div>
 			<p class=\"note\">Preparing your secure login&hellip;</p>
-			<form class=\"voucher-form\" action=\"$url/login\" method=\"get\">
-				<button type=\"submit\">Continue to login</button>
-			</form>
 		</section>
 		</main>
 		<script>window.addEventListener(\"load\",function(){window.location.replace(\"$url/login\");});</script>

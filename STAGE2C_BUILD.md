@@ -359,3 +359,12 @@ blank (dark-mode black) gap during the ~2.6 s server render. Fix: the forward
 page now paints a loading state first (CREATING SESSION + CSS spinner + light
 `html` background + `color-scheme: light`), navigating on window `load`, with
 meta-refresh + manual button unchanged underneath. Nothing else touched.
+
+## 20. Forward button removed (owner request, deployed + proven)
+
+The fallback Continue button is gone from the forward page: loading card +
+spinner navigate via load-event JS with meta-refresh underneath. No-JS
+clients still forward via meta; CPD unaffected (ignores bodies). Only clients
+with both JS and meta disabled would strand (effectively nonexistent).
+Deployed both handler paths (hash-verified, backups kept), live page shows
+CREATING SESSION with zero buttons.
