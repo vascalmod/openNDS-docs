@@ -106,16 +106,14 @@ check "zone-preset-skips-probe" '( load_theme; [ "$client_zone" = "Wi-Fi" ] )'
 
 # --- 2. CONNECT goes straight to custom status (no Continue tap) ---
 check "status-connected" 'printf "%s" "$STATUS_OUT" | grep -q "CONNECTED"'
-check "status-timer-12-41-18" 'printf "%s" "$STATUS_OUT" | grep -q "12:41:18"'
-check "status-data-seconds" 'printf "%s" "$STATUS_OUT" | grep -q "data-remaining=\"45678\""'
-check "status-countdown-script" 'printf "%s" "$STATUS_OUT" | grep -q "setInterval" && printf "%s" "$STATUS_OUT" | grep -q "data-remaining"'
-check "status-nojs-fallback-intact" 'printf "%s" "$STATUS_OUT" | sed "s|<script>.*</script>||" | grep -q "12:41:18"'
-check "status-shows-own-voucher-once" '[ "$(printf "%s" "$STATUS_OUT" | grep -o "TEST-6H" | wc -l)" -eq 1 ]'
-check "status-speed" 'printf "%s" "$STATUS_OUT" | grep -q "10 Mbps"'
-check "status-active" 'printf "%s" "$STATUS_OUT" | grep -q "Active"'
+check "status-redirect-target" 'printf "%s" "$STATUS_OUT" | grep -q "http://10.0.0.1/"'
+check "status-redirect-meta" 'printf "%s" "$STATUS_OUT" | grep "refresh" | grep -q "url=http://10.0.0.1/"'
+check "status-redirect-js" 'printf "%s" "$STATUS_OUT" | grep -q "location.replace"'
+check "status-fallback-button" 'printf "%s" "$STATUS_OUT" | grep -q "action=\"http://10.0.0.1/\""'
+check "status-hides-voucher" '! printf "%s" "$STATUS_OUT" | grep -q "TEST-6H"'
+check "status-no-voucher-field" '! printf "%s" "$STATUS_OUT" | grep -q "voucher="'
 check "status-no-thankyou" '! printf "%s" "$STATUS_OUT" | grep -q "VOUCHER RECEIVED"'
 check "status-no-landing-field" '! printf "%s" "$STATUS_OUT" | grep -q "landing"'
-check "status-no-continue-to-landing" '! printf "%s" "$STATUS_OUT" | grep -q "value=\"Continue\""'
 
 # --- 3. gating: auth call happens ONLY on backend ALLOW, with policy quotas ---
 # (CALLREC owned outside each render: footer exits inside the subshell.)
@@ -148,11 +146,10 @@ NOJSON_OUT=$( (
 	header
 	voucher_login
 ) 2>/dev/null )
-check "nojson-still-connected" 'printf "%s" "$NOJSON_OUT" | grep -q "CONNECTED"'
-check "nojson-no-timer" '! printf "%s" "$NOJSON_OUT" | grep -q "REMAINING"'
+check "nojson-still-redirects" 'printf "%s" "$NOJSON_OUT" | grep -q "http://10.0.0.1/"'
 
 # --- 5. CPD safety: inline CSS present, no JS/href leftovers ---
-check "css-status-classes" 'printf "%s" "$STATUS_OUT" | grep -q "connection-status" && printf "%s" "$STATUS_OUT" | grep -q "timer-section" && printf "%s" "$STATUS_OUT" | grep -q "info-row"'
+check "css-redirect-card" 'printf "%s" "$STATUS_OUT" | grep -q "load-spinner" && printf "%s" "$STATUS_OUT" | grep -q "voucher-form"'
 check "no-href" '! printf "%s" "$STATUS_OUT" | grep -qi "href"'
 check "no-onclick" '! printf "%s" "$STATUS_OUT" | grep -qi "onclick"'
 check "status-single-script" '[ "$(printf "%s" "$STATUS_OUT" | grep -o "<script>" | wc -l)" -eq 1 ]'
@@ -197,7 +194,7 @@ LEGACY_DENY=$( (
 ) 2>/dev/null )
 LEGACY_DENY="$LEGACY_DENY CALL=$(cat "$LEGACY_DENY_CALLREC")"; rm -f "$LEGACY_DENY_CALLREC"
 check "legacy-allow-calls-auth" 'printf "%s" "$LEGACY_OK" | grep -q "CALL=360|10240|10240"'
-check "legacy-allow-renders" 'printf "%s" "$LEGACY_OK" | grep -q "REQUEST SENT"'
+check "legacy-allow-redirects" 'printf "%s" "$LEGACY_OK" | grep -q "http://10.0.0.1/"'
 check "legacy-no-voucher-skips-auth" 'printf "%s" "$LEGACY_NOVOUCHER" | grep -q "CALL=$"'
 check "legacy-no-voucher-required" 'printf "%s" "$LEGACY_NOVOUCHER" | grep -q "VOUCHER REQUIRED"'
 check "legacy-deny-skips-auth" 'printf "%s" "$LEGACY_DENY" | grep -q "CALL=$"'

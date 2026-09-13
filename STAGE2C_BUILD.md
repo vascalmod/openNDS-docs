@@ -368,3 +368,16 @@ clients still forward via meta; CPD unaffected (ignores bodies). Only clients
 with both JS and meta disabled would strand (effectively nonexistent).
 Deployed both handler paths (hash-verified, backups kept), live page shows
 CREATING SESSION with zero buttons.
+
+## 21. Post-auth redirect to the clean entry (LOCAL ONLY, undeployed)
+
+Request: after CONNECT + successful auth, hand the browser to
+`http://10.0.0.1/` instead of sitting on the long preauth URL (which also
+leaves the voucher code in history). Both success renders (direct +
+legacy) now emit a minimal interstitial (brand + CONNECTED + spinner,
+meta-refresh 0 + JS-on-load + manual Continue fallback to `http://10.0.0.1/`,
+which serves the live custom status for the authed client). No voucher string
+and no timer block in the interstitial output. Fail/deny paths unchanged.
+Proof locally: redirect target/meta/JS/fallback assertions, no-voucher-leak
+assertions, `node --check` clean; theme 58/58 + full regression green.
+Deploy (backup → push → hash → live redirect-chain proof) on approval.

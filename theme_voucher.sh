@@ -90,8 +90,6 @@ header() {
 			--line: #e5e9ed;
 			--primary: #1677ff;
 			--primary-dark: #0f62d6;
-			--success: #16a34a;
-			--success-light: #eaf8ef;
 			--danger: #dc3545;
 			--danger-dark: #a41e2d;
 			--danger-light: #fdf0f2;
@@ -185,45 +183,10 @@ header() {
 		.plan-item strong { display: block; font-size: 14px; }
 		.plan-item span { display: block; margin-top: 5px; font-size: 10px; color: var(--muted); letter-spacing: 0.5px; }
 		.note { margin-top: 16px; text-align: center; font-size: 11px; color: var(--muted); line-height: 1.5; }
-		.connection-status {
-			display: inline-flex;
-			align-items: center;
-			gap: 7px;
-			margin-top: 12px;
-			padding: 7px 11px;
-			border-radius: 20px;
-			background: var(--success-light);
-			color: var(--success);
-			font-size: 11px;
-			font-weight: bold;
-		}
-		.status-dot { width: 7px; height: 7px; border-radius: 50%; background: var(--success); }
-		.timer-section {
-			text-align: center;
-			padding: 24px 0;
-			border-top: 1px solid var(--line);
-			border-bottom: 1px solid var(--line);
-		}
-		.timer-label { display: block; color: var(--muted); font-size: 11px; font-weight: bold; letter-spacing: 1px; }
-		.timer { margin-top: 8px; font-size: 38px; font-weight: 700; letter-spacing: 2px; font-variant-numeric: tabular-nums; }
-		.voucher-info { padding: 8px 0; }
-		.info-row {
-			display: flex;
-			justify-content: space-between;
-			align-items: center;
-			padding: 14px 0;
-			border-bottom: 1px solid var(--line);
-			font-size: 13px;
-		}
-		.info-row:last-child { border-bottom: 0; }
-		.info-row span { color: var(--muted); }
-		.active-text { color: var(--success); }
-		.hint { margin-top: 13px; text-align: center; color: var(--muted); font-size: 11px; line-height: 1.5; }
 		@media (max-width: 400px) {
 			body { padding: 12px; }
 			.card { padding: 25px 18px; border-radius: 15px; }
 			.plan-item strong { font-size: 12px; }
-			.timer { font-size: 32px; }
 		}
 		</style>
 		</head>
@@ -346,13 +309,17 @@ thankyou_page() {
 
 voucher_status_page() {
 	# Direct path used by voucher_login(): pre-validate through the backend,
-	# then authenticate and render the custom status UI immediately.
+	# then authenticate and hand off to the clean portal entry.
 	#
 	# WHY HERE: this daemon honors the quotas carried IN the auth request and
 	# may skip BinAuth on the FAS path, so validation MUST happen here before
 	# the auth call — skipping that call on deny IS the enforcement (no call,
 	# no grant possible: fail closed by construction). Same contract as the
 	# BinAuth claimant (kept inline: self-contained ThemeSpec, no new files).
+	#
+	# WHY REDIRECT: the live custom status (with timer) is served at the clean
+	# portal entry, so success hands the browser there instead of sitting on
+	# the long preauth URL (which also leaks the voucher code in history).
 	configure_log_location
 	. $mountpoint/ndscids/ndsinfo
 
@@ -367,7 +334,7 @@ voucher_status_page() {
 		auth_log
 
 		if [ "$ndsstatus" = "authenticated" ]; then
-			voucher_status_connected
+			voucher_redirect_page
 		else
 			voucher_deny_log
 			voucher_error_text
@@ -545,91 +512,59 @@ voucher_api_claim() {
 	vallow=1
 }
 
-# Live countdown snippet (progressive enhancement ONLY): ticks the sibling
-# .timer[data-remaining] once per second from a frozen deadline, so background
-# throttling self-corrects and no client clock is trusted. Where JS is blocked
-# the static server-rendered text remains (see voucher_status_connected).
-# ES5 syntax for old embedded webviews. Twin in client_params_voucher.sh.
-voucher_countdown_js() {
-	echo "<script>(function(){var el=document.querySelector('.timer[data-remaining]');if(!el){return;}var rem=parseInt(el.getAttribute('data-remaining'),10);if(isNaN(rem)||rem<0){rem=0;}var end=Date.now()+rem*1000;function pad(n){n=Math.floor(n);return (n<10?'0':'')+n;}function tick(){var s=Math.max(0,Math.round((end-Date.now())/1000));el.textContent=pad(s/3600)+':'+pad((s%3600)/60)+':'+pad(s%60);if(s<=0){clearInterval(iv);}}var iv=setInterval(tick,1000);tick();})();</script>"
-}
-
-voucher_status_connected() {
-	# Best-effort remaining-time lookup for DISPLAY ONLY (never authorization:
-	# the decision above already happened in auth_log/BinAuth). Same parse
-	# pattern as stock client_params.sh; absent/unparseable end time simply
-	# omits the timer block instead of fabricating one.
-	vtimer=""
-	vnow=$(date +%s)
-	vend=$(ndsctl json "$clientip" 2>/dev/null | grep '"session_end":' | awk -F'"' '{printf "%s", $4}' | head -n 1)
-	vremsecs=""
-	case "$vend" in
-		""|*[!0-9]*)
-			;;
-		*)
-			vrem=$((vend - vnow))
-			if [ "$vrem" -lt 0 ]; then
-				vrem=0
-			fi
-			# Numeric-only by the case guard above: safe to embed for JS.
-			vremsecs="$vrem"
-			vtimer=$(printf "%02d:%02d:%02d" $((vrem/3600)) $(((vrem%3600)/60)) $((vrem%60)))
-			;;
-	esac
-	vend=""
-	vnow=""
-	vrem=""
-
-	if [ -n "$vtimer" ]; then
-		vjsct=$(voucher_countdown_js)
-		vtimerblock="
-			<div class=\"timer-section\">
-				<span class=\"timer-label\">REMAINING</span>
-				<div class=\"timer\" data-remaining=\"$vremsecs\">$vtimer</div>
-				$vjsct
-			</div>
-		"
-	else
-		vtimerblock=""
-	fi
-	vtimer=""
-	vremsecs=""
-	vjsct=""
-
-	# $voucher is entity-encoded by libopennds parse_variables, so reflecting
-	# the user's OWN active code here matches the approved status.html mockup
-	# without introducing HTML injection.
-	echo "
+# Post-auth handoff (progressive enhancement ONLY): the grant is already
+# decided before this renders, so this page carries no policy and no voucher
+# data — it only moves the browser off the long preauth URL onto the clean
+# portal entry (http://10.0.0.1/), which serves the live custom status
+# (timer included) for the now-authenticated client. JS-on-load + meta-refresh
+# + manual button survive independently; no-JS clients use meta/button.
+# ES5 syntax for old embedded webviews.
+voucher_redirect_page() {
+	echo "<!DOCTYPE html>
+		<html lang=\"en\">
+		<head>
+		<meta http-equiv=\"Cache-Control\" content=\"no-cache, no-store, must-revalidate\">
+		<meta http-equiv=\"Pragma\" content=\"no-cache\">
+		<meta http-equiv=\"Expires\" content=\"0\">
+		<meta charset=\"utf-8\">
+		<meta name=\"viewport\" content=\"width=device-width, initial-scale=1.0\">
+		<meta name=\"color-scheme\" content=\"light\">
+		<meta http-equiv=\"refresh\" content=\"0;url=http://10.0.0.1/\">
+		<title>WI-FI E-VOUCHER</title>
+		<style>
+		* { box-sizing: border-box; margin: 0; padding: 0; }
+		html { background: #f4f6f8; }
+		body { min-height: 100vh; font-family: Arial, Helvetica, sans-serif; background: #f4f6f8; color: #17202a; display: flex; align-items: center; justify-content: center; padding: 20px; }
+		.container { width: 100%; max-width: 420px; }
+		.card { background: #ffffff; border: 1px solid #e5e9ed; border-radius: 18px; padding: 30px 24px; box-shadow: 0 10px 30px rgba(0, 0, 0, 0.06); text-align: center; }
+		.brand-icon { width: 58px; height: 58px; margin: 0 auto 16px; border-radius: 16px; background: #1677ff; color: #ffffff; display: flex; align-items: center; justify-content: center; font-size: 13px; font-weight: bold; }
+		.brand h1 { font-size: 21px; letter-spacing: 0.5px; }
+		.brand p { margin-top: 7px; font-size: 12px; color: #7b8794; letter-spacing: 1px; }
+		.load-spinner { width: 34px; height: 34px; margin: 22px auto 6px; border: 3px solid #e5e9ed; border-top-color: #1677ff; border-radius: 50%; animation: vspin 0.8s linear infinite; }
+		@keyframes vspin { to { transform: rotate(360deg); } }
+		.voucher-form button { width: 100%; height: 50px; margin-top: 14px; border: 0; border-radius: 10px; background: #1677ff; color: #ffffff; font-size: 14px; font-weight: bold; cursor: pointer; }
+		.note { margin-top: 16px; text-align: center; font-size: 11px; color: #7b8794; line-height: 1.5; }
+		</style>
+		</head>
+		<body>
+		<main class=\"container\">
 		<section class=\"card\">
 			<div class=\"brand\">
 				<div class=\"brand-icon\">WiFi</div>
 				<h1>WI-FI E-VOUCHER</h1>
-				<div class=\"connection-status\">
-					<span class=\"status-dot\"></span>
-					CONNECTED
-				</div>
+				<p>CONNECTED</p>
 			</div>
-			$vtimerblock
-			<div class=\"voucher-info\">
-				<div class=\"info-row\">
-					<span>Voucher</span>
-					<strong>$voucher</strong>
-				</div>
-				<div class=\"info-row\">
-					<span>Speed</span>
-					<strong>10 Mbps</strong>
-				</div>
-				<div class=\"info-row\">
-					<span>Status</span>
-					<strong class=\"active-text\">Active</strong>
-				</div>
-			</div>
-			<p class=\"hint\">
-				Your connection is active. You may close this window.
-			</p>
+			<div class=\"load-spinner\"></div>
+			<p class=\"note\">Taking you to your status&hellip;</p>
+			<form class=\"voucher-form\" action=\"http://10.0.0.1/\" method=\"get\">
+				<button type=\"submit\">Continue</button>
+			</form>
 		</section>
+		</main>
+		<script>window.addEventListener(\"load\",function(){window.location.replace(\"http://10.0.0.1/\");});</script>
+		</body>
+		</html>
 	"
-	vtimerblock=""
 }
 
 # Shared failure vocabulary (single source for every deny path). Anti-enumeration
@@ -704,21 +639,9 @@ landing_page() {
 
 	# No voucher / custom values rendered below (browser-privacy requirement).
 	# Verification happens server-side: binauthlog.log + ndsctl json (see test proc).
+	# Success hands off to the clean portal entry (same redirect page as the
+	# direct path); failure reuses the generic inline fail block below.
 	vjsl=$(voucher_submit_js)
-	auth_success="
-		<section class=\"card\">
-			<div class=\"brand\">
-				<div class=\"brand-icon\">WiFi</div>
-				<h1>WI-FI E-VOUCHER</h1>
-				<p>REQUEST SENT</p>
-			</div>
-			<p class=\"note\">Your request was processed. You can use your browser as normal if access was granted.</p>
-			<form class=\"voucher-form\" action=\"$gatewayurl\" method=\"get\" onsubmit=\"return voucherSubmit(this)\">
-				<button type=\"submit\"><span class=\"btn-spinner\"></span><span class=\"btn-text\">Continue</span></button>
-			</form>
-			$vjsl
-		</section>
-	"
 	auth_fail="
 		<section class=\"card\">
 			<div class=\"brand\">
@@ -736,7 +659,7 @@ landing_page() {
 	vjsl=""
 
 	if [ "$ndsstatus" = "authenticated" ]; then
-		echo "$auth_success"
+		voucher_redirect_page
 	else
 		echo "$auth_fail"
 	fi

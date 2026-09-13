@@ -58,6 +58,8 @@
   (separate fail page removed); harness now 57/57; undeployed.
 * Live counter: `data-remaining` + deadline countdown on both status pages
   (static fallback intact, `node --check` clean); undeployed.
+* Post-auth redirect: success hands the browser to `http://10.0.0.1/`
+  (meta + JS + fallback, no voucher string in output); undeployed.
 * Direct-to-status: `theme_voucher.sh` CONNECT now authenticates immediately and
   renders custom status (CONNECTED + remaining + own voucher, no Continue tap);
   legacy thankyou/landing kept as fallback; `tests/theme_voucher_test.sh` 25/25;
