@@ -59,10 +59,14 @@ class PgTests(unittest.TestCase):
         self.db = api.DB.connect()
         self.assertEqual(self.db.kind, "pg")
         # Load production schema.sql VERBATIM (split on statement terminators;
-        # schema contains no semicolons inside strings).
+        # schema contains no semicolons inside strings; strip -- comments first
+        # so header prose can never be mistaken for SQL).
         with open(SCHEMA) as fh:
             raw = fh.read()
-        for stmt in [s for s in raw.split(";") if s.strip()]:
+        nosql_comments = "\n".join(
+            line for line in raw.splitlines()
+            if not line.lstrip().startswith("--"))
+        for stmt in [s for s in nosql_comments.split(";") if s.strip()]:
             self.db.execute(stmt)
         self.db.commit()
         for code, total, used, state in SEED:

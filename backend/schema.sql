@@ -1,6 +1,13 @@
 -- Stage 2 voucher schema (PostgreSQL = production).
--- PRODUCTION CONTRACT: backend/api.py must load THIS file verbatim when
--- DATABASE_URL selects PostgreSQL (no divergent DDL, no silent SQLite).
+-- DEPLOYMENT MODEL (explicit schema install — api.py never runs DDL):
+--   The operator installs this file separately against the production database
+--   (e.g. psql "$DATABASE_URL" -f backend/schema.sql) BEFORE starting the API,
+--   and re-runs it on schema upgrades. backend/api.py opens the database and
+--   validates/claims against existing tables; it creates no tables, runs no
+--   migrations, and never mutates schema at startup, so an existing production
+--   database is never altered by (re)starting the service.
+--   backend/test_pg.py loads THIS file verbatim into scratch databases to prove
+--   the contract the API is coded against.
 -- One database, one validation function for BOTH Android CPD and Chrome.
 -- Pause-ready columns (used_secs, resume_ts, PAUSED state) exist now but only
 -- accrue in Stage 3. Stage 2 performs initial authorization only.

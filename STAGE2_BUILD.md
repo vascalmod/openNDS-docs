@@ -11,13 +11,14 @@
   `opennds/binauth_log.sh:294-298`; overrides the six contract vars (280-309).
 * `backend/schema.sql` — PostgreSQL DDL: `vouchers` + `events`, pause-ready
   columns (`used_secs`, `resume_ts`, `PAUSED`) present but Stage 2 never accrues.
-* `backend/api.py` — stdlib-only API. ONE `claim_voucher()` function for CPD+Chrome.
+* `backend/api.py` — API with stdlib HTTP/application layer + `psycopg` v3 for
+  PostgreSQL production mode. ONE `claim_voucher()` function for CPD+Chrome.
   `POST /claim` → line protocol for busybox sh; `GET /session` → JSON answering
-  the six Stage 3 questions; `GET /healthz`. SQLite locally, PostgreSQL in prod.
+  the six Stage 3 questions; `GET /healthz`. SQLite explicit-dev, PostgreSQL prod.
 * `backend/seed.sql` — LOCAL TEST rows only (`TEST-6H`/`TEST-USED`/`TEST-DISABLED`/
   `TEST-PAUSED`). `PORTAL-TEST` deliberately ABSENT (retired ⇒ DENY unknown).
-* `backend/test_api.py` — 9 stdlib unittests (temp SQLite, no network).
-* `tests/custombinauth_test.sh` — 11-case shell harness (stubbed ndsctl/fetch/hook).
+* `backend/test_api.py` — 11 sqlite unittests (temp DB, no network).
+* `tests/custombinauth_test.sh` — 33-case shell harness (stubbed ndsctl/fetch/hook).
 
 ## 2. Files modified (minimal, reviewed diffs)
 
@@ -115,7 +116,8 @@ ChatGPT-mandated hardening, implemented locally, EAP untouched:
   DB-side timestamps; `HOST` env (default 127.0.0.1); per-request try/except →
   generic `DENY`, tracebacks server-log only.
 * `backend/schema.sql` — added `total_secs >= 0`, `used_secs >= 0`,
-  `used_secs <= total_secs`; contract header (`api.py` loads it verbatim).
+  `used_secs <= total_secs`; contract header (explicit operator schema install;
+  `api.py` never runs DDL, `test_pg.py` loads `schema.sql` verbatim).
 * `custombinauth.voucher.sh` — strict MAC (`XX:…` or empty), strict IPv4
   (malformed ⇒ pre-network deny), token allowlist `A-Za-z0-9._:-` 1–128
   (empty/forbidden ⇒ deny), strict reply shape (4 fields or 6 with `EVICT`

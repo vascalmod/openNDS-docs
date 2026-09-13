@@ -22,7 +22,8 @@ production seeding, EAP deployment.
   (entity-smuggling can never match ⇒ deny), claims via router-egress POST,
   parses `ALLOW secs up down [EVICT mac]` / `DENY reason`. No `eval`/backticks/
   direct-`ndsctl`/unquoted client data. Masked syslog only (no value, no PSK).
-* `../backend/api.py` — stdlib-only. `claim_voucher()` is the ONE validation
+* `../backend/api.py` — stdlib HTTP/application layer + `psycopg` v3 for
+  PostgreSQL production mode. `claim_voucher()` is the ONE validation
   function (fresh/rebind/idempotent/expiry/disable/paused paths + `events`
   audit). `POST /claim` (PSK body field, `compare_digest`) + `GET /session`
   JSON (the six Stage 3 questions) + `/healthz`. SQLite locally, PostgreSQL

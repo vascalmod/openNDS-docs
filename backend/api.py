@@ -57,12 +57,11 @@ PORT = int(os.environ.get("PORT", "8080"))
 
 log = logging.getLogger("voucher-api")
 
-SCHEMA_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)),
-                           "schema.sql")
-
-# Explicit-dev SQLite DDL only. Production PostgreSQL ALWAYS loads schema.sql
-# verbatim (see backend/test_pg.py). The two are kept semantically identical
-# by review, never by silent substitution.
+# Explicit-dev SQLite DDL only. It mirrors backend/schema.sql (production,
+# installed separately by the operator — see its header) for local
+# development/tests. The two are kept semantically identical by review
+# (and proven by backend/test_pg.py loading schema.sql verbatim), never by
+# silent substitution: with DATABASE_URL set, this SQLite DDL is dead code.
 SQLITE_DDL = """
 CREATE TABLE IF NOT EXISTS vouchers (
     code TEXT PRIMARY KEY,
