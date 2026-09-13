@@ -303,3 +303,50 @@ Proof: `tests/theme_voucher_test.sh` 52/52 (reason texts, byte-identical
 unknown/invalid/disabled, masked deny-log codes, no-fetch on malformed,
 loading markup+CSS+script presence, no-JS-independent rendering) + full
 regression green. Deploy on approval.
+
+## 16. Portal render speedup (deployed + measured)
+
+Complaint: ~4 s from portal visit to login UI. Measured: forward page ~1.1 s
++ ThemeSpec render ~5.5 s. Root causes: (1) `get_client_interface.sh`
+(~1.4 s ping sweep) runs on EVERY preauth render for `$client_zone`, which
+our UI never displays; (2) hop relied on meta-refresh timing alone.
+Fixes (both files, both live): theme presets `client_zone="Wi-Fi"`
+(documented; BinAuth keeps full per-auth zone detection), forward page adds
+instant JS navigation (meta + button survive as fallback). Measured after:
+forward ~1.4 s with booster present, preauth render **2.64 s** (~52% faster).
+Remaining ~2.6 s is stock-core fork overhead on the EAP CPU (frozen).
+Deployed with per-file backups, hash-verified, syntax-clean; no restart.
+
+## 17. Inline login errors + submit loading state (LOCAL ONLY, undeployed)
+
+Request: (a) voucher failures render inline on the login card (code preserved
+for correction) instead of a separate error page; (b) submit buttons show a
+spinner + disabled state across the multi-second backend wait.
+* (a) `voucher_error_text()` maps the existing claim classes to the fixed
+  vocabulary (expired / in-use / required / invalid / retry; unknown, disabled
+  and malformed byte-identical anti-enumeration); both deny paths render
+  `login_form` with an inline banner. Separate fail page deleted. Deny audit
+  retained (masked reason + MAC).
+* (b) CSS spinner + `:disabled` + one tiny inline ES5 `voucherSubmit` on every
+  submit form (CONNECT/Continue/Try-again). Progressive enhancement ONLY:
+  inert where JS is blocked; correctness rests on the idempotent backend
+  claim (duplicate submit = harmless rerequest), asserted by preserved
+  no-JS render tests.
+* Policy note (unchanged): hard "used from another device" DENY would break
+  the approved evict-allow rebind (new phone / rotated MAC lockout); `paused`
+  rows are the only truthful in-use signal. Volume "limit reached" has no
+  backing counter (time limit IS the expired message).
+Proof: harness 57/57 (inline banner, preserved code, reason texts, identical
+unknown/invalid/disabled, masked log codes, loading markup/CSS/script,
+no-JS rendering) + full regression green. Deploy on approval.
+
+## 18. Live remaining-time counter (deployed + proven)
+
+Request: remaining time went stale until manual refresh. Both status pages now
+embed server seconds (`data-remaining`, digit-guarded at render) plus one tiny
+inline ES5 countdown (frozen deadline, self-correcting, freezes at 00:00:00
+with no auto-action). Progressive enhancement only: blocked scripts leave the
+exact previous static display. Unlimited sessions still omit the timer.
+Proof: deterministic `data-remaining="45678"` + `12:41:18` static agreement,
+single-script assertions, `node --check` over every inline script block,
+no-JS fallback equivalence; theme 61/61, entry 37/37, full regression green.

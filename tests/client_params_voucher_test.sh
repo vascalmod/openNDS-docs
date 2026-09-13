@@ -87,6 +87,9 @@ check "forward-no-voucher-form" '! printf "%s" "$PREAUTH_OUT" | grep -q "name=\"
 # --- 2. authenticated -> custom status, never stock dump ---
 check "status-connected" 'printf "%s" "$AUTHED_OUT" | grep -q "CONNECTED"'
 check "status-timer" 'printf "%s" "$AUTHED_OUT" | grep -q "12:41:18"'
+check "status-data-seconds" 'printf "%s" "$AUTHED_OUT" | grep -q "data-remaining=\"45678\""'
+check "status-countdown-script" 'printf "%s" "$AUTHED_OUT" | grep -q "setInterval"'
+check "status-nojs-fallback-intact" 'printf "%s" "$AUTHED_OUT" | sed "s|<script>.*</script>||" | grep -q "12:41:18"'
 check "status-voucher-once" '[ "$(printf "%s" "$AUTHED_OUT" | grep -o "TEST-6H" | wc -l)" -eq 1 ]'
 check "status-logout-kept" 'printf "%s" "$AUTHED_OUT" | grep -q "action=\"http://status.client/opennds_deny/\""'
 check "status-no-session-status" '! printf "%s" "$AUTHED_OUT" | grep -q "Session Status"'
@@ -139,12 +142,30 @@ rm -f /tmp/want.txt /tmp/got.txt
 BUSY_OUT=$(PATH="$STUBBIN:$PATH" JSON_RESP="locked" sh "$FILE" status 10.0.0.200 "" 2>/dev/null)
 check "busy-page" 'printf "%s" "$BUSY_OUT" | grep -qi "busy"'
 
-# --- 8. CPD safety on new pages ---
-check "forward-no-script" '! printf "%s" "$PREAUTH_OUT" | grep -qi "<script"'
+# --- 8. navigation layering: instant JS + meta fallback, nothing else ---
+check "forward-instant-nav" 'printf "%s" "$PREAUTH_OUT" | grep -q "location.replace"'
+check "forward-single-script" '[ "$(printf "%s" "$PREAUTH_OUT" | grep -o "<script>" | wc -l)" -eq 1 ]'
+check "forward-meta-fallback" 'printf "%s" "$PREAUTH_OUT" | grep "refresh" | grep -q "url=http://status.client/login"'
 check "forward-no-href" '! printf "%s" "$PREAUTH_OUT" | grep -qi "href"'
-check "status-no-script" '! printf "%s" "$AUTHED_OUT" | grep -qi "<script"'
 check "status-no-href" '! printf "%s" "$AUTHED_OUT" | grep -qi "href"'
+check "status-single-script" '[ "$(printf "%s" "$AUTHED_OUT" | grep -o "<script>" | wc -l)" -eq 1 ]'
 check "status-inline-css" 'printf "%s" "$AUTHED_OUT" | grep -q "connection-status"'
+
+# --- 9. inline scripts are real syntax (node --check when available) ---
+if command -v node >/dev/null 2>&1; then
+	printf '%s' "$AUTHED_OUT $PREAUTH_OUT" | grep -o "<script>.*</script>" | sed "s|<script>||;s|</script>||" > /tmp/jsblocks.txt
+	JSN=0; JSFAIL=0
+	while IFS= read -r jsline; do
+		[ -z "$jsline" ] && continue
+		JSN=$((JSN + 1))
+		printf '%s' "$jsline" > /tmp/jsblock.js
+		node --check /tmp/jsblock.js 2>/dev/null || JSFAIL=$((JSFAIL + 1))
+	done < /tmp/jsblocks.txt
+	rm -f /tmp/jsblocks.txt /tmp/jsblock.js
+	check "inline-js-syntax-ok" '[ "$JSN" -ge 1 ] && [ "$JSFAIL" -eq 0 ]'
+else
+	echo "SKIP: node absent, inline-js-syntax-ok not run"
+fi
 
 rm -rf "$STUBBIN" /tmp/ndscids/ndsinfo
 echo "---- client_params_voucher: PASS=$PASS FAIL=$FAIL ----"

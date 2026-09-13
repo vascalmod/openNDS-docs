@@ -277,8 +277,11 @@ voucher_code() {
 }
 
 # voucher_forward_page: unauthenticated browsers go straight into the standard
-# login flow with zero clicks (meta refresh + manual fallback form to the
-# stock login endpoint, which mints a fresh FAS query for the ThemeSpec).
+# login flow with zero clicks: instant client-side navigation with meta-refresh
+# + manual fallback (all three survive independently). The target is the stock
+# login endpoint, which mints a fresh FAS query for the ThemeSpec — no voucher
+# data is fabricated here. CPD clients ignore page bodies (protocol is MHD's
+# 511 + redirect), so this changes nothing for them.
 voucher_forward_page() {
 	echo "<!DOCTYPE html>
 		<html lang=\"en\">
@@ -290,6 +293,7 @@ voucher_forward_page() {
 		<meta name=\"viewport\" content=\"width=device-width, initial-scale=1.0\">
 		<meta http-equiv=\"refresh\" content=\"0;url=$url/login\">
 		<title>WI-FI E-VOUCHER</title>
+		<script>window.location.replace(\"$url/login\");</script>
 		<style>
 		* { box-sizing: border-box; margin: 0; padding: 0; }
 		body { min-height: 100vh; font-family: Arial, Helvetica, sans-serif; background: #f4f6f8; color: #17202a; display: flex; align-items: center; justify-content: center; padding: 20px; }
@@ -321,22 +325,37 @@ voucher_forward_page() {
 	"
 }
 
+# Live countdown snippet (progressive enhancement ONLY): ticks the sibling
+# .timer[data-remaining] once per second from a frozen deadline, so background
+# throttling self-corrects and no client clock is trusted. Where JS is blocked
+# the static server-rendered text remains. ES5 syntax for old webviews.
+# Twin in theme_voucher.sh.
+voucher_countdown_js() {
+	echo "<script>(function(){var el=document.querySelector('.timer[data-remaining]');if(!el){return;}var rem=parseInt(el.getAttribute('data-remaining'),10);if(isNaN(rem)||rem<0){rem=0;}var end=Date.now()+rem*1000;function pad(n){n=Math.floor(n);return (n<10?'0':'')+n;}function tick(){var s=Math.max(0,Math.round((end-Date.now())/1000));el.textContent=pad(s/3600)+':'+pad((s%3600)/60)+':'+pad(s%60);if(s<=0){clearInterval(iv);}}var iv=setInterval(tick,1000);tick();})();</script>"
+}
+
 # voucher_status_page: authenticated voucher session status (self-contained,
-# no external CSS/images/JS). Timer omitted when the end is Unlimited rather
+# no external CSS/images). Timer omitted when the end is Unlimited rather
 # than fabricating one. No account dump, no stock Session Status text.
 voucher_status_page() {
 	if [ -n "$vrem" ]; then
+		# $vrem is digit-guarded by voucher_session_active: safe to embed.
+		vremsecs="$vrem"
 		vtimer=$(printf "%02d:%02d:%02d" $((vrem/3600)) $(((vrem%3600)/60)) $((vrem%60)))
+		vjsct=$(voucher_countdown_js)
 		vtimerblock="
 			<div class=\"timer-section\">
 				<span class=\"timer-label\">REMAINING</span>
-				<div class=\"timer\">$vtimer</div>
+				<div class=\"timer\" data-remaining=\"$vremsecs\">$vtimer</div>
+				$vjsct
 			</div>
 		"
 	else
 		vtimerblock=""
 	fi
 	vtimer=""
+	vremsecs=""
+	vjsct=""
 	vcode=$(voucher_code)
 	echo "<!DOCTYPE html>
 		<html lang=\"en\">

@@ -101,10 +101,15 @@ check "login-has-plan" 'printf "%s" "$LOGIN_OUT" | grep -q "6 HOURS"'
 check "login-has-fas" 'printf "%s" "$LOGIN_OUT" | grep -q "name=\"fas\""'
 check "login-no-thankyou" '! printf "%s" "$LOGIN_OUT" | grep -q "VOUCHER RECEIVED"'
 check "login-no-status" '! printf "%s" "$LOGIN_OUT" | grep -q "CONNECTED"'
+check "login-no-error-initially" '! printf "%s" "$LOGIN_OUT" | grep -q "<div class=\"form-error\""'
+check "zone-preset-skips-probe" '( load_theme; [ "$client_zone" = "Wi-Fi" ] )'
 
 # --- 2. CONNECT goes straight to custom status (no Continue tap) ---
 check "status-connected" 'printf "%s" "$STATUS_OUT" | grep -q "CONNECTED"'
 check "status-timer-12-41-18" 'printf "%s" "$STATUS_OUT" | grep -q "12:41:18"'
+check "status-data-seconds" 'printf "%s" "$STATUS_OUT" | grep -q "data-remaining=\"45678\""'
+check "status-countdown-script" 'printf "%s" "$STATUS_OUT" | grep -q "setInterval" && printf "%s" "$STATUS_OUT" | grep -q "data-remaining"'
+check "status-nojs-fallback-intact" 'printf "%s" "$STATUS_OUT" | sed "s|<script>.*</script>||" | grep -q "12:41:18"'
 check "status-shows-own-voucher-once" '[ "$(printf "%s" "$STATUS_OUT" | grep -o "TEST-6H" | wc -l)" -eq 1 ]'
 check "status-speed" 'printf "%s" "$STATUS_OUT" | grep -q "10 Mbps"'
 check "status-active" 'printf "%s" "$STATUS_OUT" | grep -q "Active"'
@@ -125,7 +130,9 @@ check "deny-skips-auth-call" 'printf "%s" "$DENY_CALL_OUT" | grep -q "CALL=$"'
 check "fetch-fail-skips-auth-call" 'printf "%s" "$FAILCALL_OUT" | grep -q "CALL=$"'
 check "denied-invalid-title" 'printf "%s" "$DENIED_OUT" | grep -q "INVALID VOUCHER"'
 check "denied-invalid-text" 'printf "%s" "$DENIED_OUT" | grep -q "not valid"'
-check "denied-no-voucher-text" '! printf "%s" "$DENIED_OUT" | grep -q "TEST-6H"'
+check "denied-inline-error-block" 'printf "%s" "$DENIED_OUT" | grep -q "<div class=\"form-error\""'
+check "denied-preserves-code" 'printf "%s" "$DENIED_OUT" | grep -q "value=\"TEST-6H\""'
+check "denied-stays-login-form" 'printf "%s" "$DENIED_OUT" | grep -q "name=\"voucher\""'
 check "denied-no-timer" '! printf "%s" "$DENIED_OUT" | grep -q "REMAINING"'
 
 # --- 4. json outage degrades (CONNECTED, no fabricated timer) ---
@@ -146,9 +153,9 @@ check "nojson-no-timer" '! printf "%s" "$NOJSON_OUT" | grep -q "REMAINING"'
 
 # --- 5. CPD safety: inline CSS present, no JS/href leftovers ---
 check "css-status-classes" 'printf "%s" "$STATUS_OUT" | grep -q "connection-status" && printf "%s" "$STATUS_OUT" | grep -q "timer-section" && printf "%s" "$STATUS_OUT" | grep -q "info-row"'
-check "no-script" '! printf "%s" "$STATUS_OUT" | grep -qi "<script"'
 check "no-href" '! printf "%s" "$STATUS_OUT" | grep -qi "href"'
 check "no-onclick" '! printf "%s" "$STATUS_OUT" | grep -qi "onclick"'
+check "status-single-script" '[ "$(printf "%s" "$STATUS_OUT" | grep -o "<script>" | wc -l)" -eq 1 ]'
 
 # --- 6. legacy paths hardened: landing requires voucher + ALLOW ---
 # (CALLREC owned outside: landing_page ends in footer->exit, so the record is
@@ -219,6 +226,7 @@ check "expired-title" 'printf "%s" "$DENYOUT" | grep -q "VOUCHER EXPIRED"'
 check "expired-text" 'printf "%s" "$DENYOUT" | grep -q "used up"'
 check "expired-not-invalid" '! printf "%s" "$DENYOUT" | grep -q "not valid"'
 check "expired-logged" 'printf "%s" "$DENYLOGOUT" | grep -q "why=expired"'
+check "expired-inline-login" 'printf "%s" "$DENYOUT" | grep -q "name=\"voucher\""'
 render_denied "paused"
 check "paused-title" 'printf "%s" "$DENYOUT" | grep -q "VOUCHER IN USE"'
 check "paused-text" 'printf "%s" "$DENYOUT" | grep -q "another device"'
@@ -274,6 +282,23 @@ THANKYOU_OUT=$( (
 	thankyou_page
 ) 2>/dev/null )
 check "thankyou-loading-markup" 'printf "%s" "$THANKYOU_OUT" | grep -q "AUTHENTICATING" && printf "%s" "$THANKYOU_OUT" | grep -q "btn-spinner"'
+
+# --- 9. inline scripts are real syntax (node --check when available) ---
+if command -v node >/dev/null 2>&1; then
+	printf '%s' "$STATUS_OUT $LOGIN_OUT $DENIED_OUT" | grep -o "<script>.*</script>" | sed "s|<script>||;s|</script>||" > /tmp/jsblocks.txt
+	JSN=0; JSFAIL=0
+	while IFS= read -r jsline; do
+		[ -z "$jsline" ] && continue
+		JSN=$((JSN + 1))
+		printf '%s' "$jsline" > /tmp/jsblock.js
+		node --check /tmp/jsblock.js 2>/dev/null || JSFAIL=$((JSFAIL + 1))
+	done < /tmp/jsblocks.txt
+	rm -f /tmp/jsblocks.txt /tmp/jsblock.js
+	[ "$JSN" -ge 1 ] && [ "$JSFAIL" -eq 0 ]
+	check "inline-js-syntax-ok" '[ "$JSN" -ge 1 ] && [ "$JSFAIL" -eq 0 ]'
+else
+	echo "SKIP: node absent, inline-js-syntax-ok not run"
+fi
 
 rm -f /tmp/ndscids/ndsinfo "$PSKFILE"
 rm -rf "$STUBBIN"

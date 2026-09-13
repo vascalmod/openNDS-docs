@@ -31,11 +31,12 @@
 #       the approved status.html mockup does (entity-encoded by core).
 # - userinfo intentionally does NOT contain the voucher value (marker only).
 #
-# Failure UX: denied claims render per-reason text from a fixed vocabulary
-# (expired / in-use / required / invalid / retry). Unknown, disabled and
-# malformed codes deliberately share ONE message (anti-enumeration); transport
-# failures share the retry message. Denied attempts write a masked server-side
-# log line (reason + client MAC only).
+# Failure UX: failures re-render the LOGIN page itself with an inline error
+# banner (code preserved for correction) — no separate error page. Text comes
+# from a fixed vocabulary (expired / in-use / required / invalid / retry).
+# Unknown, disabled and malformed codes deliberately share ONE message
+# (anti-enumeration); transport failures share the retry message. Denied
+# attempts write a masked server-side log line (reason + client MAC only).
 #
 # Loading UX: submit buttons carry a CSS spinner + disabled state driven by a
 # tiny inline script (progressive enhancement ONLY — inert where JS is
@@ -91,6 +92,9 @@ header() {
 			--primary-dark: #0f62d6;
 			--success: #16a34a;
 			--success-light: #eaf8ef;
+			--danger: #dc3545;
+			--danger-dark: #a41e2d;
+			--danger-light: #fdf0f2;
 		}
 		body {
 			min-height: 100vh;
@@ -126,6 +130,17 @@ header() {
 		.brand h1 { font-size: 21px; letter-spacing: 0.5px; }
 		.brand p { margin-top: 7px; font-size: 12px; color: var(--muted); letter-spacing: 1px; }
 		.voucher-form { display: flex; flex-direction: column; }
+		.form-error {
+			margin: 0 0 16px;
+			padding: 12px 14px;
+			border: 1px solid #f5c2c7;
+			border-left: 4px solid var(--danger);
+			background: var(--danger-light);
+			border-radius: 10px;
+			text-align: left;
+		}
+		.form-error strong { display: block; font-size: 13px; color: var(--danger-dark); letter-spacing: 0.3px; }
+		.form-error span { display: block; margin-top: 4px; font-size: 12px; color: var(--muted); line-height: 1.5; }
 		.voucher-form label { font-size: 13px; font-weight: 600; margin-bottom: 8px; }
 		.voucher-form input {
 			width: 100%; height: 50px;
@@ -243,7 +258,20 @@ voucher_submit_js() {
 
 login_form() {
 	# $voucher here is entity-encoded by libopennds parse_variables; safe to
-	# reflect inside the quoted value attribute for re-serve preservation.
+	# reflect inside the quoted value attribute for re-serve preservation
+	# (this is what keeps the code visible when an error is shown inline).
+	# When $vtitle is set (failed attempt), an inline error banner renders
+	# above the form: same page, no navigation, code preserved for correction.
+	if [ -n "$vtitle" ]; then
+		verrblock="
+			<div class=\"form-error\" role=\"alert\">
+				<strong>$vtitle</strong>
+				<span>$vmsg</span>
+			</div>
+		"
+	else
+		verrblock=""
+	fi
 	vjs=$(voucher_submit_js)
 	echo "
 		<section class=\"card\">
@@ -252,6 +280,7 @@ login_form() {
 				<h1>WI-FI E-VOUCHER</h1>
 				<p>CONNECT TO INTERNET</p>
 			</div>
+			$verrblock
 			<form class=\"voucher-form\" action=\"/opennds_preauth/\" method=\"get\" onsubmit=\"return voucherSubmit(this)\">
 				<input type=\"hidden\" name=\"fas\" value=\"$fas\">
 				<label for=\"voucher\">Voucher Code</label>
@@ -267,13 +296,16 @@ login_form() {
 				<button type=\"submit\"><span class=\"btn-spinner\"></span><span class=\"btn-text\">CONNECT</span></button>
 			</form>
 			$vjs
-			<div class=\"plan\">
-				<div class=\"plan-item\"><strong>&#8369;5</strong><span>PRICE</span></div>
-				<div class=\"plan-item\"><strong>6 HOURS</strong><span>TIME</span></div>
-				<div class=\"plan-item\"><strong>10 Mbps</strong><span>SPEED</span></div>
+			<div class="plan">
+				<div class="plan-item"><strong>&#8369;5</strong><span>PRICE</span></div>
+				<div class="plan-item"><strong>6 HOURS</strong><span>TIME</span></div>
+				<div class="plan-item"><strong>10 Mbps</strong><span>SPEED</span></div>
 			</div>
 		</section>
 	"
+	verrblock=""
+	vtitle=""
+	vmsg=""
 }
 
 thankyou_page() {
@@ -338,11 +370,13 @@ voucher_status_page() {
 			voucher_status_connected
 		else
 			voucher_deny_log
-			voucher_status_denied
+			voucher_error_text
+			login_form
 		fi
 	else
 		voucher_deny_log
-		voucher_status_denied
+		voucher_error_text
+		login_form
 	fi
 
 	footer
@@ -511,6 +545,15 @@ voucher_api_claim() {
 	vallow=1
 }
 
+# Live countdown snippet (progressive enhancement ONLY): ticks the sibling
+# .timer[data-remaining] once per second from a frozen deadline, so background
+# throttling self-corrects and no client clock is trusted. Where JS is blocked
+# the static server-rendered text remains (see voucher_status_connected).
+# ES5 syntax for old embedded webviews. Twin in client_params_voucher.sh.
+voucher_countdown_js() {
+	echo "<script>(function(){var el=document.querySelector('.timer[data-remaining]');if(!el){return;}var rem=parseInt(el.getAttribute('data-remaining'),10);if(isNaN(rem)||rem<0){rem=0;}var end=Date.now()+rem*1000;function pad(n){n=Math.floor(n);return (n<10?'0':'')+n;}function tick(){var s=Math.max(0,Math.round((end-Date.now())/1000));el.textContent=pad(s/3600)+':'+pad((s%3600)/60)+':'+pad(s%60);if(s<=0){clearInterval(iv);}}var iv=setInterval(tick,1000);tick();})();</script>"
+}
+
 voucher_status_connected() {
 	# Best-effort remaining-time lookup for DISPLAY ONLY (never authorization:
 	# the decision above already happened in auth_log/BinAuth). Same parse
@@ -519,6 +562,7 @@ voucher_status_connected() {
 	vtimer=""
 	vnow=$(date +%s)
 	vend=$(ndsctl json "$clientip" 2>/dev/null | grep '"session_end":' | awk -F'"' '{printf "%s", $4}' | head -n 1)
+	vremsecs=""
 	case "$vend" in
 		""|*[!0-9]*)
 			;;
@@ -527,6 +571,8 @@ voucher_status_connected() {
 			if [ "$vrem" -lt 0 ]; then
 				vrem=0
 			fi
+			# Numeric-only by the case guard above: safe to embed for JS.
+			vremsecs="$vrem"
 			vtimer=$(printf "%02d:%02d:%02d" $((vrem/3600)) $(((vrem%3600)/60)) $((vrem%60)))
 			;;
 	esac
@@ -535,16 +581,20 @@ voucher_status_connected() {
 	vrem=""
 
 	if [ -n "$vtimer" ]; then
+		vjsct=$(voucher_countdown_js)
 		vtimerblock="
 			<div class=\"timer-section\">
 				<span class=\"timer-label\">REMAINING</span>
-				<div class=\"timer\">$vtimer</div>
+				<div class=\"timer\" data-remaining=\"$vremsecs\">$vtimer</div>
+				$vjsct
 			</div>
 		"
 	else
 		vtimerblock=""
 	fi
 	vtimer=""
+	vremsecs=""
+	vjsct=""
 
 	# $voucher is entity-encoded by libopennds parse_variables, so reflecting
 	# the user's OWN active code here matches the approved status.html mockup
@@ -582,16 +632,16 @@ voucher_status_connected() {
 	vtimerblock=""
 }
 
-voucher_status_denied() {
-	# User-facing failure text mapped from the claim failure class in
-	# $vdenywhy. Anti-enumeration rules (deliberate, do not "improve" without
-	# a security review):
-	# - unknown, disabled and malformed codes share ONE "not valid" message,
-	#   so responses never reveal whether a code exists or is admin-disabled;
-	# - transport/config failures share ONE retry message with no internals;
-	# - only expired (time genuinely exhausted) and paused (session held
-	#   elsewhere) get distinct text, since those describe the holder's own
-	#   voucher state rather than oracle answers.
+# Shared failure vocabulary (single source for every deny path). Anti-enumeration
+# rules (deliberate, do not "improve" without a security review):
+# - unknown, disabled and malformed codes share ONE "not valid" message, so
+#   responses never reveal whether a code exists or is admin-disabled;
+# - transport/config failures share ONE retry message with no internals;
+# - only expired (time genuinely exhausted) and paused (session held
+#   elsewhere) get distinct text, since those describe the holder's own
+#   voucher state rather than oracle answers.
+# Sets $vtitle/$vmsg from $vdenywhy. Callers render them inline in login_form.
+voucher_error_text() {
 	case "$vdenywhy" in
 		expired)
 			vtitle="VOUCHER EXPIRED"
@@ -614,24 +664,6 @@ voucher_status_denied() {
 			vmsg="This voucher code is not valid. Check the code and try again."
 			;;
 	esac
-	vjsd=$(voucher_submit_js)
-	echo "
-		<section class=\"card\">
-			<div class=\"brand\">
-				<div class=\"brand-icon\">WiFi</div>
-				<h1>WI-FI E-VOUCHER</h1>
-				<p>$vtitle</p>
-			</div>
-			<p class=\"note\">$vmsg</p>
-			<form class=\"voucher-form\" action=\"http://$gatewayfqdn\" method=\"get\" onsubmit=\"return voucherSubmit(this)\">
-				<button type=\"submit\"><span class=\"btn-spinner\"></span><span class=\"btn-text\">Try again</span></button>
-			</form>
-			$vjsd
-		</section>
-	"
-	vtitle=""
-	vmsg=""
-	vjsd=""
 }
 
 landing_page() {
@@ -649,7 +681,8 @@ landing_page() {
 	if [ -z "$voucher" ]; then
 		vdenywhy="novoucher"
 		voucher_deny_log
-		voucher_status_denied
+		voucher_error_text
+		login_form
 		footer
 	fi
 
@@ -657,7 +690,8 @@ landing_page() {
 
 	if [ "$vallow" != "1" ]; then
 		voucher_deny_log
-		voucher_status_denied
+		voucher_error_text
+		login_form
 		footer
 	fi
 
@@ -747,6 +781,13 @@ ndsparamlist="$ndsparamlist $ndscustomparams $ndscustomimages $ndscustomfiles"
 additionalthemevars="voucher"
 
 fasvarlist="$fasvarlist $additionalthemevars"
+
+# Render-speed note: libopennds resolves an empty $client_zone by shelling out
+# to get_client_interface.sh (ARP lookups plus ~1s ping waits per wireless
+# interface on this CPU). This theme never displays the zone — detailed zone
+# detection still runs per authentication inside binauth_log.sh — so preset it
+# here to skip that per-page cost. Measured saving on EAP225: ~1.4 s/render.
+client_zone="Wi-Fi"
 
 # Do NOT set/encode binauth_custom here; voucher_status_page() (primary) and
 # thankyou_page() (legacy fallback) set and encode it per-submission so each
