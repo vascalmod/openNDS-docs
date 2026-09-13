@@ -517,8 +517,8 @@ voucher_api_claim() {
 # data — it only moves the browser off the long preauth URL onto the clean
 # portal entry (http://10.0.0.1/), which serves the live custom status
 # (timer included) for the now-authenticated client. JS-on-load + meta-refresh
-# + manual button survive independently; no-JS clients use meta/button.
-# ES5 syntax for old embedded webviews.
+# carry the navigation (owner decision: no manual button); no-JS clients use
+# meta-refresh. ES5 syntax for old embedded webviews.
 voucher_redirect_page() {
 	echo "<!DOCTYPE html>
 		<html lang=\"en\">
@@ -542,7 +542,6 @@ voucher_redirect_page() {
 		.brand p { margin-top: 7px; font-size: 12px; color: #7b8794; letter-spacing: 1px; }
 		.load-spinner { width: 34px; height: 34px; margin: 22px auto 6px; border: 3px solid #e5e9ed; border-top-color: #1677ff; border-radius: 50%; animation: vspin 0.8s linear infinite; }
 		@keyframes vspin { to { transform: rotate(360deg); } }
-		.voucher-form button { width: 100%; height: 50px; margin-top: 14px; border: 0; border-radius: 10px; background: #1677ff; color: #ffffff; font-size: 14px; font-weight: bold; cursor: pointer; }
 		.note { margin-top: 16px; text-align: center; font-size: 11px; color: #7b8794; line-height: 1.5; }
 		</style>
 		</head>
@@ -556,9 +555,6 @@ voucher_redirect_page() {
 			</div>
 			<div class=\"load-spinner\"></div>
 			<p class=\"note\">Taking you to your status&hellip;</p>
-			<form class=\"voucher-form\" action=\"http://10.0.0.1/\" method=\"get\">
-				<button type=\"submit\">Continue</button>
-			</form>
 		</section>
 		</main>
 		<script>window.addEventListener(\"load\",function(){window.location.replace(\"http://10.0.0.1/\");});</script>
