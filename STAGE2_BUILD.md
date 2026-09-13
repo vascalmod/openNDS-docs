@@ -1,0 +1,105 @@
+# Stage 2 Build — real voucher validation + initial session auth (LOCAL ONLY)
+
+> Send to ChatGPT for review before ANY EAP deployment.
+> Nothing was copied to the EAP. No `uci`/`ssh`/`scp` executed. No secrets committed.
+> Stage 3 remains design-only (`docs/09-stage2-unified-entrypoint.md`, now corrected).
+
+## 1. Files created
+
+* `custombinauth.voucher.sh` — EAP claimant. Deploy target (MANUAL, later):
+  `/usr/lib/opennds/custombinauth.sh` (backup stub first). Sourced by
+  `opennds/binauth_log.sh:294-298`; overrides the six contract vars (280-309).
+* `backend/schema.sql` — PostgreSQL DDL: `vouchers` + `events`, pause-ready
+  columns (`used_secs`, `resume_ts`, `PAUSED`) present but Stage 2 never accrues.
+* `backend/api.py` — stdlib-only API. ONE `claim_voucher()` function for CPD+Chrome.
+  `POST /claim` → line protocol for busybox sh; `GET /session` → JSON answering
+  the six Stage 3 questions; `GET /healthz`. SQLite locally, PostgreSQL in prod.
+* `backend/seed.sql` — LOCAL TEST rows only (`TEST-6H`/`TEST-USED`/`TEST-DISABLED`/
+  `TEST-PAUSED`). `PORTAL-TEST` deliberately ABSENT (retired ⇒ DENY unknown).
+* `backend/test_api.py` — 9 stdlib unittests (temp SQLite, no network).
+* `tests/custombinauth_test.sh` — 11-case shell harness (stubbed ndsctl/fetch/hook).
+
+## 2. Files modified (minimal, reviewed diffs)
+
+* `theme_voucher.sh` — comments/userinfo markers ONLY (Stage 1 bypass → Stage 2
+  validation wording; `PORTAL-TEST` retired note). Flow, forms, CSS untouched.
+* `docs/09-stage2-unified-entrypoint.md` — the 6 required corrections:
+  internal-PreAuth wording (§3/§5/§9), paused re-identification (§6),
+  dual-state CONNECTED rule (§6), routing investigation §4b, CPD+Chrome
+  one-backend (§8/§9), port-80/LuCI untouched (§0/§4b/§5/guardrails + checklist).
+* Untouched: `opennds/*`, `index.*`, `status.html`, UCI, ports, firewall, DHCP,
+  statuspath, status UI, pause/resume.
+
+## 3. Decisions/defaults (flag if ChatGPT objects)
+
+* Format: strict uppercase `A-Z0-9-`, 4–20 chars, hyphens significant.
+  Entity-smuggled input (`&#59;` etc.) can never match ⇒ DENY.
+* Conflict: evict-old/allow-new (private-MAC friendly); old MAC best-effort
+  `daemon_deauth` via the documented binauth-callable hook, never fatal.
+* Outage/unconfigured/malformed: fail-CLOSED (`exitlevel=1`, generic fail page).
+* `PORTAL-TEST`: retired (absent ⇒ `DENY unknown`); local tests use `TEST-*`.
+* `session_length = ceil(remaining/60)` (openNDS minute granularity), cap 1440;
+  rates from API (`UP_KBPS`/`DOWN_KBPS`, default 10240; EAP calibration confirms
+  the 10 Mbps mapping at deploy); quotas 0.
+* `PAUSED` rows DENY on the claim path in Stage 2 (resume is Stage 3).
+* PSK via env/`VOUCHER_PSK_FILE` (0600) + optional UCI names; PSK in POST body
+  (no URL/logs); `compare_digest` server-side; EAP is the sole API caller
+  (browser never touches backend ⇒ CPD ≡ Chrome, zero walled-garden changes).
+
+## 4. Data flow (unchanged wire, now enforced)
+
+```text
+form → /opennds_preauth/ → $voucher → binauth_custom → encode_custom → custom
+→ auth_log → ndsctl auth → BinAuth auth_client $7
+→ custombinauth.voucher.sh: b64decode → allowlist → POST /claim {voucher,mac,ip,token}
+→ ALLOW secs up down [EVICT old] ⇒ session_length/rates, exitlevel=0
+→ DENY/* ⇒ exitlevel=1, generic REQUEST FAILED (no oracle, no leaks)
+```
+
+## 5. Local test results (all green, evidence below)
+
+* `sh -n` ×3 + `ast.parse` ×2 → clean (`shellcheck` absent, noted).
+* `backend/test_api.py`: 9/9 OK — fresh allow 21600, unknown/invalid/disabled/
+  expired/paused deny, expiry marking, rebound+EVICT, same-MAC idempotent,
+  six-question `session_info`.
+* `tests/custombinauth_test.sh`: 11/11 PASS — allow 360 min, unknown deny,
+  bad-charset/entity deny with ZERO fetch calls, backend-down deny, bad-reply
+  deny, ceil 21601→361, deauth passthrough, lowercase normalize, evict hook
+  (`daemon_deauth OLD`, sess 300), no-URL fail-closed.
+* Live HTTP integration (temp DB + real server): `ALLOW 21600 10240 10240`,
+  retype-lower allow, retired `PORTAL-TEST` → `DENY unknown`, `A;B` → `DENY
+  invalid`, `/session` JSON active/remaining correct.
+* Audits: no `eval`/backticks/direct-`ndsctl` in code (comment mentions only);
+  no `PORTAL-TEST` logic; no committed secrets (PSK env-only; scan clean).
+* Theme regression: `fasvarlist` gains `voucher`; login posts to preauth;
+  landing `REQUEST SENT`, zero voucher-plaintext hits.
+
+## 6. Manual deploy (DO NOT RUN — ChatGPT approves first)
+
+```sh
+# backend (Ubuntu host): install schema, seed PRODUCTION vouchers manually,
+# set VOUCHER_PSK (secret, never in repo), run api behind systemd, open LAN port to EAP only
+# EAP:
+scp custombinauth.voucher.sh root@10.0.0.1:/tmp/custombinauth.voucher.sh
+ssh root@10.0.0.1 'cp /usr/lib/opennds/custombinauth.sh /tmp/custombinauth.stub.bak && cp /tmp/custombinauth.voucher.sh /usr/lib/opennds/custombinauth.sh && sh -n /usr/lib/opennds/custombinauth.sh'
+# configure VOUCHER_API_URL + 0600 PSK file (or uci voucher_api_url/voucher_psk_file), then live tests:
+#  - EAP→API reachability + rate calibration (10 Mbps mapping) BEFORE customer traffic
+#  - Android CPD + Chrome walks with TEST voucher; retired PORTAL-TEST must deny
+```
+
+Rollback: restore `/tmp/custombinauth.stub.bak` → `/usr/lib/opennds/custombinauth.sh`
+(+ `uci revert`/restore if options added); no other component changed.
+
+## 7. Out of scope (not built)
+
+Pause/resume accrual, custom status UI, `statuspath` switch, port-80/LuCI work,
+production seeding, EAP deployment itself.
+
+## 8. Ask ChatGPT
+
+* [ ] Six corrections in `docs/09` faithful to the verdict?
+* [ ] `auth_client`-only + fail-closed + render-only entry layer preserved?
+* [ ] Single DB/function, no per-browser branches, MAC never identity?
+* [ ] Line protocol + `/session` JSON acceptable contracts?
+* [ ] Evict-old/allow-new + `PORTAL-TEST` retirement + PAUSED-deny defaults OK?
+* [ ] Safe to proceed to manual deploy after rate calibration?
