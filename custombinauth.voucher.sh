@@ -100,15 +100,97 @@ if [ "$action" = "auth_client" ]; then
 
 	# --- 4. client metadata from BinAuth positionals (transient, not identity) ---
 	# auth_client: $2 mac, $5 ip, $6 token (binauth_log.sh:160-168).
+	# Nothing here is trusted: every field is allowlisted before it may enter
+	# the claim POST body, so no value can inject extra form fields
+	# (&, =, %, CR, LF and friends are all outside the allowed sets).
 	vmac="$2"
 	vip="$5"
 	vtoken="$6"
+
+	# MAC: strict XX:XX:XX:XX:XX:XX (six hex octets) else empty-and-continue.
+	# An absent/unparseable MAC never fails the claim; it is metadata only.
+	case "$vmac" in
+		??:??:??:??:??:??)
+			case "$vmac" in
+				*[!0-9a-fA-F:]*)
+					vmac=""
+					;;
+			esac
+			;;
+		*)
+			vmac=""
+			;;
+	esac
+
+	# IP: strict IPv4 dotted quad (covers 10.0.0.0/24 LAN). Malformed => deny
+	# here, before any network call, so it can never reach the POST body.
 	if [ -z "$vdeny" ]; then
-		case "$vmac" in
-			""|*[!0-9a-fA-F:]*)
-				vdeny="bad_mac"
+		vip_ok=1
+		case "$vip" in
+			*.*.*.*)
+				case "$vip" in
+					*[!0-9.]*)
+						vip_ok=0
+						;;
+					*)
+						vo_rest="$vip"
+						vo_parts=0
+						while [ -n "$vo_rest" ] && [ "$vip_ok" -eq 1 ]; do
+							vo_parts=$((vo_parts + 1))
+							case "$vo_rest" in
+								*.*)
+									vo_oct=${vo_rest%%.*}
+									vo_rest=${vo_rest#*.}
+									;;
+								*)
+									vo_oct=$vo_rest
+									vo_rest=""
+									;;
+							esac
+							case "$vo_oct" in
+								""|*[!0-9]*|????*)
+									vip_ok=0
+									;;
+								*)
+									if [ "$vo_oct" -gt 255 ] 2>/dev/null; then
+										vip_ok=0
+									fi
+									;;
+							esac
+						done
+						if [ "$vo_parts" -ne 4 ]; then
+							vip_ok=0
+						fi
+						vo_rest=""
+						vo_parts=0
+						vo_oct=""
+						;;
+				esac
+				;;
+			*)
+				vip_ok=0
 				;;
 		esac
+		if [ "$vip_ok" -ne 1 ]; then
+			vdeny="bad_ip"
+		fi
+		vip_ok=""
+	fi
+
+	# Token: restricted to the OpenNDS-token-safe set, 1..128 chars.
+	# Empty or anything outside [A-Za-z0-9._:-] (notably & = % CR LF) => deny.
+	if [ -z "$vdeny" ]; then
+		vtoklen=${#vtoken}
+		if [ "$vtoklen" -lt 1 ] || [ "$vtoklen" -gt 128 ]; then
+			vdeny="bad_token"
+		else
+			case "$vtoken" in
+				*[!A-Za-z0-9._:-]*)
+					vdeny="bad_token"
+					;;
+			esac
+		fi
+		vtoklen=""
 	fi
 
 	# --- 5. config present? (fail-closed forces operator configuration) ---
@@ -127,9 +209,9 @@ if [ "$action" = "auth_client" ]; then
 	fi
 
 	# --- 6. claim against backend (router egress; browser never calls it) ---
-	# Body values are constrained charsets (voucher allowlisted above;
-	# MAC hex+colon; IP digits+dots/colons; token hex; PSK operator-set),
-	# so no URL-encoding layer is needed at this trust boundary.
+	# Every body value passed the gates above (allowlisted voucher; strict or
+	# empty MAC; strict IPv4; token-safe charset; operator PSK), so no value
+	# can alter the form structure (&, =, %, CR, LF cannot occur).
 	vresp=""
 	if [ -z "$vdeny" ]; then
 		vpost="voucher=$vnorm&mac=$vmac&ip=$vip&token=$vtoken&psk=$vpsk"
@@ -144,30 +226,73 @@ if [ "$action" = "auth_client" ]; then
 		vpost=""
 	fi
 
-	# --- 7. parse line response: ALLOW <secs> <up> <down> [EVICT <mac>] / DENY ... ---
+	# --- 7. parse line response (strict shape, validated numerics) ---
+	# Accept ONLY:
+	#   ALLOW <remaining_seconds> <up_kbps> <down_kbps>
+	#   ALLOW <remaining_seconds> <up_kbps> <down_kbps> EVICT <oldmac>
+	# Anything else (bare ALLOW, non-numeric/negative/oversized values,
+	# wrong field count, bad EVICT) => DENY. First line only.
 	vremaining=""
 	vup=""
 	vdown=""
 	vevict=""
 	if [ -z "$vdeny" ]; then
-		vdecision=$(printf '%s' "$vresp" | awk '{print $1}')
+		vline=$(printf '%s' "$vresp" | head -n 1)
+		vdecision=$(printf '%s' "$vline" | awk '{print $1}')
+		vnf=$(printf '%s' "$vline" | awk '{print NF}')
+		vline=""
 		if [ "$vdecision" = "ALLOW" ]; then
-			vremaining=$(printf '%s' "$vresp" | awk '{print $2}')
-			vup=$(printf '%s' "$vresp" | awk '{print $3}')
-			vdown=$(printf '%s' "$vresp" | awk '{print $4}')
-			case "$vremaining" in ""|*[!0-9]*) vdeny="bad_reply";; esac
-			case "$vup" in ""|*[!0-9]*) vdeny="bad_reply";; esac
-			case "$vdown" in ""|*[!0-9]*) vdeny="bad_reply";; esac
-			if [ -z "$vdeny" ] && [ "$vremaining" -le 0 ] 2>/dev/null; then
-				vdeny="no_remaining"
-			fi
+			case "$vnf" in
+				4|6)
+					;;
+				*)
+					vdeny="bad_reply"
+					;;
+			esac
 			if [ -z "$vdeny" ]; then
-				vevict=$(printf '%s' "$vresp" | awk '$5=="EVICT" {print $6}')
-				case "$vevict" in
-					""|*[!0-9a-fA-F:]*)
-						vevict=""
-						;;
-				esac
+				vremaining=$(printf '%s' "$vresp" | awk 'NR==1{print $2}')
+				vup=$(printf '%s' "$vresp" | awk 'NR==1{print $3}')
+				vdown=$(printf '%s' "$vresp" | awk 'NR==1{print $4}')
+				case "$vremaining" in ""|*[!0-9]*) vdeny="bad_reply";; esac
+				case "$vup" in ""|*[!0-9]*) vdeny="bad_reply";; esac
+				case "$vdown" in ""|*[!0-9]*) vdeny="bad_reply";; esac
+				# Bounds: remaining <= 9999999 (~115 days, far above any plan);
+				# rates <= 1000000 kb/s. openNDS session cap applied below.
+				if [ -z "$vdeny" ]; then
+					if [ "${#vremaining}" -gt 7 ] || [ "${#vup}" -gt 7 ] || [ "${#vdown}" -gt 7 ]; then
+						vdeny="bad_reply"
+					elif [ "$vup" -gt 1000000 ] 2>/dev/null || [ "$vdown" -gt 1000000 ] 2>/dev/null; then
+						vdeny="bad_reply"
+					fi
+				fi
+				if [ -z "$vdeny" ] && [ "$vremaining" -le 0 ] 2>/dev/null; then
+					vdeny="no_remaining"
+				fi
+			fi
+			if [ -z "$vdeny" ] && [ "$vnf" -eq 6 ]; then
+				vfifth=$(printf '%s' "$vresp" | awk 'NR==1{print $5}')
+				vsixth=$(printf '%s' "$vresp" | awk 'NR==1{print $6}')
+				if [ "$vfifth" != "EVICT" ]; then
+					vdeny="bad_reply"
+				else
+					case "$vsixth" in
+						??:??:??:??:??:??)
+							case "$vsixth" in
+								*[!0-9a-fA-F:]*)
+									vdeny="bad_reply"
+									;;
+								*)
+									vevict="$vsixth"
+									;;
+							esac
+							;;
+						*)
+							vdeny="bad_reply"
+							;;
+					esac
+				fi
+				vfifth=""
+				vsixth=""
 			fi
 		elif [ "$vdecision" = "DENY" ]; then
 			vdeny="backend_deny"
@@ -175,6 +300,7 @@ if [ "$action" = "auth_client" ]; then
 			vdeny="bad_reply"
 		fi
 		vdecision=""
+		vnf=""
 	fi
 	vresp=""
 

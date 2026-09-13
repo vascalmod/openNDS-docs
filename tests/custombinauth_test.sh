@@ -40,10 +40,10 @@ export VOUCHER_TIMEOUT=5
 export VOUCHER_LIBOPENDS="$HOOK"
 export EVICT_FILE=$(mktemp)
 
-# run_case <name> <action> <mac> <ip> <token> <custom-plain> <stub-resp> <want-exit> [want-sess]
+# run_case <name> <action> <mac> <ip> <token> <custom-plain> <stub-resp> <want-exit> [want-sess] [want-calls]
 run_case() {
 	name="$1"; action="$2"; mac="$3"; ip="$4"; token="$5"; plain="$6"
-	STUB_RESP="$7"; want_exit="$8"; want_sess="$9"
+	STUB_RESP="$7"; want_exit="$8"; want_sess="$9"; want_calls="${10}"
 	printf '%s' "$STUB_RESP" > "$RESPFILE"
 	: > "$CALLFILE"
 	: > "$EVICT_FILE"
@@ -59,31 +59,87 @@ run_case() {
 	got=$(cat /tmp/cb_out.txt)
 	got_exit=$(printf '%s' "$got" | cut -d'|' -f1)
 	got_sess=$(printf '%s' "$got" | cut -d'|' -f2)
-	if [ "$got_exit" = "$want_exit" ] && { [ -z "$want_sess" ] || [ "$got_sess" = "$want_sess" ]; }; then
-		PASS=$((PASS + 1)); echo "PASS: $name (exit=$got_exit sess=$got_sess calls=$(fetch_calls))"
+	got_calls=$(fetch_calls)
+	ok=1
+	[ "$got_exit" = "$want_exit" ] || ok=0
+	{ [ -z "$want_sess" ] || [ "$got_sess" = "$want_sess" ]; } || ok=0
+	{ [ -z "$want_calls" ] || [ "$got_calls" = "$want_calls" ]; } || ok=0
+	if [ "$ok" -eq 1 ]; then
+		PASS=$((PASS + 1)); echo "PASS: $name (exit=$got_exit sess=$got_sess calls=$got_calls)"
 	else
-		FAIL=$((FAIL + 1)); echo "FAIL: $name got=[$got] want_exit=$want_exit want_sess=$want_sess"
+		FAIL=$((FAIL + 1)); echo "FAIL: $name got=[$got/$got_calls] want_exit=$want_exit want_sess=$want_sess want_calls=$want_calls"
 	fi
 }
 
 run_case "allow-fresh" auth_client AA:BB:CC:DD:EE:01 10.0.0.200 tok1 \
-	"voucher=TEST-6H" "ALLOW 21600 10240 10240" 0 360
+	"voucher=TEST-6H" "ALLOW 21600 10240 10240" 0 360 1
 run_case "deny-unknown" auth_client AA:BB:CC:DD:EE:01 10.0.0.200 tok1 \
-	"voucher=NOPE-1234" "DENY unknown" 1 0
+	"voucher=NOPE-1234" "DENY unknown" 1 0 1
 run_case "deny-bad-charset" auth_client AA:BB:CC:DD:EE:01 10.0.0.200 tok1 \
-	"voucher=A;B" "" 1 0
+	"voucher=A;B" "" 1 0 0
 run_case "deny-entity-smuggle" auth_client AA:BB:CC:DD:EE:01 10.0.0.200 tok1 \
-	"voucher=A&#59;B" "" 1 0
+	"voucher=A&#59;B" "" 1 0 0
 run_case "deny-backend-down" auth_client AA:BB:CC:DD:EE:01 10.0.0.200 tok1 \
-	"voucher=TEST-6H" "" 1 0
+	"voucher=TEST-6H" "" 1 0 1
 run_case "deny-bad-reply" auth_client AA:BB:CC:DD:EE:01 10.0.0.200 tok1 \
-	"voucher=TEST-6H" "ALLOW lots fast faster" 1 0
+	"voucher=TEST-6H" "ALLOW lots fast faster" 1 0 1
 run_case "ceil-21601-to-361" auth_client AA:BB:CC:DD:EE:01 10.0.0.200 tok1 \
-	"voucher=TEST-6H" "ALLOW 21601 10240 10240" 0 361
+	"voucher=TEST-6H" "ALLOW 21601 10240 10240" 0 361 1
 run_case "deauth-passthrough" deauth AA:BB:CC:DD:EE:01 10.0.0.200 tok1 \
-	"voucher=TEST-6H" "" 0 0
+	"voucher=TEST-6H" "" 0 0 0
 run_case "lowercase-normalized" auth_client AA:BB:CC:DD:EE:01 10.0.0.200 tok1 \
-	"voucher=test-6h" "ALLOW 21600 10240 10240" 0 360
+	"voucher=test-6h" "ALLOW 21600 10240 10240" 0 360 1
+
+# --- strict reply-shape vectors (all must DENY) ---
+run_case "reply-bare-ALLOW" auth_client AA:BB:CC:DD:EE:01 10.0.0.200 tok1 \
+	"voucher=TEST-6H" "ALLOW" 1 0 1
+run_case "reply-alpha-remaining" auth_client AA:BB:CC:DD:EE:01 10.0.0.200 tok1 \
+	"voucher=TEST-6H" "ALLOW abc 10240 10240" 1 0 1
+run_case "reply-negative-remaining" auth_client AA:BB:CC:DD:EE:01 10.0.0.200 tok1 \
+	"voucher=TEST-6H" "ALLOW -1 10240 10240" 1 0 1
+run_case "reply-alpha-up" auth_client AA:BB:CC:DD:EE:01 10.0.0.200 tok1 \
+	"voucher=TEST-6H" "ALLOW 21600 abc 10240" 1 0 1
+run_case "reply-alpha-down" auth_client AA:BB:CC:DD:EE:01 10.0.0.200 tok1 \
+	"voucher=TEST-6H" "ALLOW 21600 10240 abc" 1 0 1
+run_case "reply-random" auth_client AA:BB:CC:DD:EE:01 10.0.0.200 tok1 \
+	"voucher=TEST-6H" "RANDOM" 1 0 1
+run_case "reply-zero-remaining" auth_client AA:BB:CC:DD:EE:01 10.0.0.200 tok1 \
+	"voucher=TEST-6H" "ALLOW 0 10240 10240" 1 0 1
+run_case "reply-oversized-remaining" auth_client AA:BB:CC:DD:EE:01 10.0.0.200 tok1 \
+	"voucher=TEST-6H" "ALLOW 99999999 10240 10240" 1 0 1
+run_case "reply-oversized-rate" auth_client AA:BB:CC:DD:EE:01 10.0.0.200 tok1 \
+	"voucher=TEST-6H" "ALLOW 21600 9999999 10240" 1 0 1
+run_case "reply-bad-evict-mac" auth_client AA:BB:CC:DD:EE:01 10.0.0.200 tok1 \
+	"voucher=TEST-6H" "ALLOW 21600 10240 10240 EVICT bogus" 1 0 1
+run_case "reply-wrong-fifth" auth_client AA:BB:CC:DD:EE:01 10.0.0.200 tok1 \
+	"voucher=TEST-6H" "ALLOW 21600 10240 10240 EXTRA x" 1 0 1
+run_case "reply-five-fields" auth_client AA:BB:CC:DD:EE:01 10.0.0.200 tok1 \
+	"voucher=TEST-6H" "ALLOW 21600 10240 10240 extra" 1 0 1
+
+# --- strict ip/token vectors (pre-network rejects: calls must stay 0) ---
+run_case "bad-ip-octet" auth_client AA:BB:CC:DD:EE:01 10.0.0.999 tok1 \
+	"voucher=TEST-6H" "ALLOW 21600 10240 10240" 1 0 0
+run_case "bad-ip-inject" auth_client AA:BB:CC:DD:EE:01 '10.0.0.1&evil=1' tok1 \
+	"voucher=TEST-6H" "ALLOW 21600 10240 10240" 1 0 0
+run_case "bad-ip-short" auth_client AA:BB:CC:DD:EE:01 10.0.0 tok1 \
+	"voucher=TEST-6H" "ALLOW 21600 10240 10240" 1 0 0
+run_case "bad-token-amp" auth_client AA:BB:CC:DD:EE:01 10.0.0.200 'ab&cd' \
+	"voucher=TEST-6H" "ALLOW 21600 10240 10240" 1 0 0
+run_case "bad-token-eq" auth_client AA:BB:CC:DD:EE:01 10.0.0.200 'ab=cd' \
+	"voucher=TEST-6H" "ALLOW 21600 10240 10240" 1 0 0
+run_case "bad-token-pct" auth_client AA:BB:CC:DD:EE:01 10.0.0.200 'ab%cd' \
+	"voucher=TEST-6H" "ALLOW 21600 10240 10240" 1 0 0
+run_case "bad-token-empty" auth_client AA:BB:CC:DD:EE:01 10.0.0.200 '' \
+	"voucher=TEST-6H" "ALLOW 21600 10240 10240" 1 0 0
+LONGTOK=$(head -c 129 /dev/zero | tr '\0' 'a')
+run_case "bad-token-long" auth_client AA:BB:CC:DD:EE:01 10.0.0.200 "$LONGTOK" \
+	"voucher=TEST-6H" "ALLOW 21600 10240 10240" 1 0 0
+run_case "ok-token-punct" auth_client AA:BB:CC:DD:EE:01 10.0.0.200 'tok-1_2.3:4' \
+	"voucher=TEST-6H" "ALLOW 21600 10240 10240" 0 360 1
+
+# --- non-strict MAC degrades to empty metadata, claim still proceeds ---
+run_case "loose-mac-emptied" auth_client AABBCCDDEEFF 10.0.0.200 tok1 \
+	"voucher=TEST-6H" "ALLOW 21600 10240 10240" 0 360 1
 
 # evict hook: different old MAC must be passed to daemon_deauth exactly once
 : > "$EVICT_FILE"

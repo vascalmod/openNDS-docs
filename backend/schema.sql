@@ -1,14 +1,16 @@
 -- Stage 2 voucher schema (PostgreSQL = production).
+-- PRODUCTION CONTRACT: backend/api.py must load THIS file verbatim when
+-- DATABASE_URL selects PostgreSQL (no divergent DDL, no silent SQLite).
 -- One database, one validation function for BOTH Android CPD and Chrome.
 -- Pause-ready columns (used_secs, resume_ts, PAUSED state) exist now but only
 -- accrue in Stage 3. Stage 2 performs initial authorization only.
--- Local API tests run the same DDL on SQLite (see backend/api.py); types below
--- are the production contract.
+-- Timestamps are real TIMESTAMPTZ with UTC now() defaults (never app strings).
 
 CREATE TABLE IF NOT EXISTS vouchers (
     code         TEXT PRIMARY KEY,          -- normalized: UPPER, A-Z0-9-, 4..20 chars
-    total_secs   INTEGER NOT NULL DEFAULT 21600,  -- 6 hours plan
-    used_secs    INTEGER NOT NULL DEFAULT 0,      -- Stage 3 accrues on deauth
+    total_secs   INTEGER NOT NULL DEFAULT 21600 CHECK (total_secs >= 0),  -- 6 hours plan
+    used_secs    INTEGER NOT NULL DEFAULT 0 CHECK (used_secs >= 0),       -- Stage 3 accrues on deauth
+    CONSTRAINT used_within_total CHECK (used_secs <= total_secs),
     state        TEXT NOT NULL DEFAULT 'NEW'
                      CHECK (state IN ('NEW','ACTIVE','PAUSED','EXPIRED','DISABLED')),
     bound_mac    TEXT,                      -- transient metadata, NEVER identity

@@ -103,3 +103,30 @@ production seeding, EAP deployment itself.
 * [ ] Line protocol + `/session` JSON acceptable contracts?
 * [ ] Evict-old/allow-new + `PORTAL-TEST` retirement + PAUSED-deny defaults OK?
 * [ ] Safe to proceed to manual deploy after rate calibration?
+
+## 9. Corrections round (approved scope, all tests green)
+
+ChatGPT-mandated hardening, implemented locally, EAP untouched:
+
+* `backend/api.py` — real PostgreSQL via `DATABASE_URL` (`psycopg` v3) with
+  explicit backend selection (pg-only when configured; sqlite explicit-dev via
+  `VOUCHER_DB`; refuse startup if neither); `%s`-placeholder adapter
+  (`SELECT … FOR UPDATE` on pg, `BEGIN IMMEDIATE` encapsulated for sqlite);
+  DB-side timestamps; `HOST` env (default 127.0.0.1); per-request try/except →
+  generic `DENY`, tracebacks server-log only.
+* `backend/schema.sql` — added `total_secs >= 0`, `used_secs >= 0`,
+  `used_secs <= total_secs`; contract header (`api.py` loads it verbatim).
+* `custombinauth.voucher.sh` — strict MAC (`XX:…` or empty), strict IPv4
+  (malformed ⇒ pre-network deny), token allowlist `A-Za-z0-9._:-` 1–128
+  (empty/forbidden ⇒ deny), strict reply shape (4 fields or 6 with `EVICT`
+  + strict MAC), numeric caps (remaining ≤ 9999999, rates ≤ 1000000).
+* Tests added: `backend/test_pg.py` (6, live pg), `backend/test_server.py`
+  (3, LAN-bind + HTTP auth/leak), `tests/stage1_guard.sh` + manifest
+  (frozen files + scope + accrual + ndsctl-surface), 12 reply-shape and
+  8 ip/token vectors in the shell harness with fetch-call assertions.
+
+Results: `test_api` 11/11 · `test_pg` 6/6 (postgres:16-alpine disposable,
+`psycopg` 3.3.5) · `test_server` 3/3 (LAN 10.0.0.107) · shell 33/33 ·
+guard PASS. No-fallback proven (pg-configured + unreachable ⇒ BackendError,
+no sqlite file). Injection vectors denied pre-network (0 fetch calls).
+Stage 1 manifest: all 4 files unchanged.
